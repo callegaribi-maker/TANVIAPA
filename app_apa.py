@@ -190,7 +190,9 @@ def run_pipeline(L, G, p):
     ev = []
     for i, (bs, be) in enumerate(bursts, 1):
         if p["class_mode"] == "alternada":
-            tipo = "frente" if (i - 1) % 2 == 0 else "trás"
+            first = p.get("first_step", "frente")
+            other = "trás" if first == "frente" else "frente"
+            tipo = first if (i - 1) % 2 == 0 else other
         else:
             tipo = classify_burst(sig, bs, p)
         ho = detect_heel_off(sig, bs, p) if tipo == "frente" else np.nan
@@ -229,7 +231,9 @@ def main():
     ml_axis = c1.selectbox("L5 ML", ["x", "y", "z"], 0)
     ml_sign = c2.selectbox("sinal ML", [1, -1], 0)
     ap_axis = c1.selectbox("L5 AP", ["x", "y", "z"], 2)
-    ap_sign = c2.selectbox("sinal AP (+ = frente)", [1, -1], 0)
+    ap_sign = c2.selectbox("sinal AP (+ = frente)", [1, -1], 1,
+                           help="Celular em L5 com a tela para fora: o eixo z aponta para trás, "
+                                "então use −1 para que + seja frente.")
     l5_vert_axis = c1.selectbox("L5 vertical", ["x", "y", "z"], 1)
     leg_axis = c2.selectbox("Perna vertical", ["x", "y", "z"], 1)
 
@@ -251,6 +255,7 @@ def main():
                           ["alternada", "automática (AP)"], 0,
                           help="Alternada: 1º passo após o salto = frente, depois alterna. "
                                "Automática: sinal da maior excursão AP de L5 antes do passo.")
+    first_step = sb.selectbox("1º passo após o salto (modo alternado)", ["trás", "frente"], 0)
     class_thr = sb.slider("Limiar AP p/ classificar frente/trás (m/s²)", 0.3, 2.0, 0.8, 0.1)
     ho_thr = sb.slider("Heel-off: pico mínimo na perna (m/s² acima da base)", 0.3, 3.0, 0.8, 0.1)
 
@@ -270,7 +275,7 @@ def main():
              jump_until=jump_until, lag=lag_val if lag_manual else None,
              burst_thr=burst_thr, burst_merge=burst_merge, burst_min_dur=burst_min_dur,
              post_jump=post_jump, class_thr=class_thr,
-             class_mode="alternada" if class_mode == "alternada" else "auto", ho_thr=ho_thr,
+             class_mode="alternada" if class_mode == "alternada" else "auto", first_step=first_step, ho_thr=ho_thr,
              base_len=base_len, k_sd=k_sd, min_abs=min_abs, min_dur=min_dur)
     R = run_pipeline(L, G, p)
     sig, t = R["sig"], R["sig"].t.values
@@ -392,7 +397,7 @@ def main():
 
     # ---------------- 4. Todas as tentativas alinhadas ----------------
     st.subheader("4. Tentativas alinhadas no heel-off")
-    grp_by = st.radio("Agrupar por", ["sentido ML (lado do apoio)", "todas juntas"], horizontal=True)
+    grp_by = st.radio("Agrupar por", ["sentido ML", "todas juntas"], horizontal=True)
     tt = np.arange(-1.8, 1.0, 1 / fs)
     fig = make_subplots(rows=1, cols=2, subplot_titles=("L5 ML", "L5 AP (+ frente)"))
     palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd"]
@@ -407,10 +412,11 @@ def main():
                 y = np.interp(tt + rr.HO_s, t, s) - b0
                 M.append(y)
                 fig.add_scatter(x=tt, y=y, line=dict(color=cor, width=0.6), opacity=0.35,
-                                showlegend=False, row=1, col=ci)
+                                name=f"passo {rr.tentativa}", showlegend=False, row=1, col=ci)
             M = np.array(M)
             fig.add_scatter(x=tt, y=M.mean(0), line=dict(color=cor, width=3),
                             name=f"média ML {gname} (n={len(M)})" if gname != "todas" else f"média (n={len(M)})",
+                            hoverinfo="skip",
                             showlegend=(ci == 1), row=1, col=ci)
     fig.add_vline(x=0, line=dict(color="red", dash="dash"))
     fig.update_xaxes(title_text="tempo relativo ao heel-off (s)")
