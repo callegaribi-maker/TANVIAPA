@@ -152,19 +152,35 @@ def apa_metrics(sig, ho, p):
             dv = s[ww] - b0
             d = 1 if dv[np.argmax(np.abs(dv))] > 0 else -1
         win = np.arange(bend, jho + 1)
-        ob = d * (s[win] - b0) > thr
+        dev = d * (s[win] - b0)
+        method = p.get("onset_method", "backward")
         onset = None
-        for n in range(len(win) - nmin + 1):
-            if ob[n:n + nmin].all():
-                onset = n; break
+        if method == "first":
+            # first crossing that stays outside the band for >= min_dur
+            ob = dev > thr
+            for n in range(len(win) - nmin + 1):
+                if ob[n:n + nmin].all():
+                    onset = n; break
+        else:
+            # walk back from the peak to the last sample inside the band
+            ipk = int(np.argmax(dev))
+            lim = thr if method == "backward" else p.get("peak_frac", 0.15) * dev[ipk]
+            if dev[ipk] > thr:
+                n = ipk
+                while n > 0 and dev[n - 1] > lim:
+                    n -= 1
+                onset = n
         out[f"{name}_direction"] = "+" if d > 0 else "−"
         out[f"{name}_threshold_m_s2"] = round(thr, 3)
         if onset is None:
-            for k in ("onset_rel_HO_ms", "onset_s", "peak_m_s2", "peak_rel_HO_ms", "dv_m_s"):
+            for k in ("onset_rel_HO_ms", "onset_s", "peak_m_s2", "peak_rel_HO_ms", "dv_m_s",
+                      "onset_threshold_m_s2"):
                 out[f"{name}_{k}"] = np.nan
             continue
         pw = win[onset:]
         pki = pw[np.argmax(d * (s[pw] - b0))]
+        out[f"{name}_onset_threshold_m_s2"] = round(
+            thr if method != "peak_frac" else p.get("peak_frac", 0.15) * d * (s[pki] - b0), 3)
         out[f"{name}_onset_rel_HO_ms"] = round((t[win[onset]] - ho) * 1000)
         out[f"{name}_onset_s"] = round(t[win[onset]], 3)
         out[f"{name}_peak_m_s2"] = round(s[pki] - b0, 3)
@@ -252,10 +268,25 @@ def main():
     ho_thr = sb.slider("Heel-off: minimum leg peak above baseline (m/s²)", 0.3, 3.0, 0.8, 0.1)
 
     sb.header("APA onset")
+    onset_label = sb.radio(
+        "Onset criterion",
+        ["Backward from peak (baseline threshold)", "Backward from peak (% of peak)",
+         "First sustained crossing"], 0,
+        help="Backward from peak: start at the APA peak and go back in time to the last sample "
+             "inside the threshold band; earlier oscillations that returned to baseline are ignored. "
+             "% of peak: same, but the threshold is a fraction of the peak amplitude. "
+             "First sustained crossing: first sample after the baseline that leaves the band and "
+             "stays outside for the minimum time.")
+    onset_method = {"Backward from peak (baseline threshold)": "backward",
+                    "Backward from peak (% of peak)": "peak_frac",
+                    "First sustained crossing": "first"}[onset_label]
+    peak_frac = sb.slider("% of peak (for the % criterion)", 5, 50, 15, 5,
+                          disabled=onset_method != "peak_frac") / 100
     base_len = sb.slider("Baseline window (s)", 0.2, 1.0, 0.5, 0.05)
     k_sd = sb.slider("Threshold = k × baseline SD", 1.0, 6.0, 3.0, 0.5)
     min_abs = sb.slider("Minimum absolute threshold (m/s²)", 0.0, 0.5, 0.1, 0.02)
-    min_dur = sb.slider("Minimum time outside the band (s)", 0.02, 0.3, 0.1, 0.01)
+    min_dur = sb.slider("Minimum time outside the band (s, first-crossing criterion)",
+                        0.02, 0.3, 0.1, 0.01, disabled=onset_method != "first")
 
     if not (fL5 and fLeg):
         st.info("Upload both files (L5 and leg) in the sidebar to start.")
@@ -269,7 +300,8 @@ def main():
              post_jump=post_jump, class_thr=class_thr, ho_thr=ho_thr,
              class_mode="alternating" if class_mode == "Alternating" else "auto",
              first_step=first_step,
-             base_len=base_len, k_sd=k_sd, min_abs=min_abs, min_dur=min_dur)
+             base_len=base_len, k_sd=k_sd, min_abs=min_abs, min_dur=min_dur,
+             onset_method=onset_method, peak_frac=peak_frac)
     R = run_pipeline(L, G, p)
     sig, t = R["sig"], R["sig"].t.values
 
@@ -369,7 +401,9 @@ def main():
         fig.add_scatter(x=tt, y=s[w] - b0, line=dict(color=cor), row=i, col=1)
         if col != "gy":
             nm = col.upper()
-            thr = r[f"{nm}_threshold_m_s2"]
+            thr = r[f"{nm}_onset_threshold_m_s2"]
+            if np.isnan(thr):
+                thr = r[f"{nm}_threshold_m_s2"]
             fig.add_hrect(y0=-thr, y1=thr, fillcolor="rgba(128,128,128,0.15)", line_width=0, row=i, col=1)
             if not np.isnan(r.get(f"{nm}_onset_rel_HO_ms", np.nan)):
                 x0 = r[f"{nm}_onset_rel_HO_ms"] / 1000
@@ -468,8 +502,12 @@ def main():
             "- **Heel-off:** from the forward AP peak − 0.3 s, first leg vertical peak above baseline + "
             "threshold; heel-off = start of that rise.\n"
             "- **Baseline:** quietest window before heel-off (between HO − 2.6 s and HO − 0.6 s).\n"
-            "- **APA onset:** first sample after the baseline where the signal exceeds baseline ± "
-            "max(k·SD, minimum) in the dominant direction and stays outside for the minimum time.\n"
+            "- **APA peak:** largest deviation in the dominant direction between the end of the "
+            "baseline and heel-off.\n"
+            "- **APA onset (default):** from the peak, walk back in time to the last sample inside "
+            "baseline ± max(k·SD, minimum); earlier oscillations that returned to baseline are ignored. "
+            "Alternatives: the same with a threshold of a % of the peak amplitude, or the first "
+            "crossing that stays outside the band for the minimum time.\n"
             "- **dv:** integral of acceleration from APA onset to heel-off (velocity change).\n"
             "- **Caution:** the L5 AP signal includes the gravity projection when the trunk tilts "
             "(≈0.17 m/s² per degree) as well as linear acceleration.")
