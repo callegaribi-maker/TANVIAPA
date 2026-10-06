@@ -73,6 +73,8 @@ def build_signals(L, G, p):
     sig["ml"] = lowpass(np.interp(t, L.t, L[p["ml_axis"]]) * p["ml_sign"], p["fc_l5"], fs)
     sig["ap"] = lowpass(np.interp(t, L.t, L[p["ap_axis"]]) * p["ap_sign"], p["fc_l5"], fs)
     sig["gy"] = lowpass(np.interp(t, G.t - p["lag"], G[p["leg_axis"]]), p["fc_leg"], fs)
+    for a in "xyz":  # slow components of the leg sensor (gravity direction) for shank tilt
+        sig[f"leg_{a}"] = lowpass(np.interp(t, G.t - p["lag"], G[a]), 3.0, fs)
     return sig
 
 
@@ -123,25 +125,74 @@ def quiet_baseline(sig, ho, fs, length=0.5, earliest=2.6, latest=0.6):
     return best[1] if best else (t >= ho - 1.5) & (t < ho - 1.0)
 
 
-def detect_heel_off(sig, bs, p):
-    """Anchor: forward AP peak near the burst. Heel-off = start of the rise of the leg
-    vertical signal up to its first peak > baseline + ho_thr, searching from AP peak - 0.3 s."""
-    t, ap, gy = sig.t.values, sig.ap.values, sig.gy.values
-    w = np.flatnonzero((t > bs - 1.0) & (t < bs + 1.0))
-    t_appk = t[w[np.argmax(ap[w])]]
-    pre = (t > t_appk - 2.5) & (t < t_appk - 1.2)
-    g0 = np.median(gy[pre]) if pre.any() else np.median(gy)
-    seg = np.flatnonzero((t > t_appk - 0.3) & (t < t_appk + 1.0))
+def leg_baseline(sig, bs, length=0.5):
+    """Quietest `length`-s window of the leg signals between bs-2.5 s and bs-0.3 s."""
+    t = sig.t.values
+    V = sig[["leg_x", "leg_y", "leg_z"]].values
+    best = None
+    for s0 in np.arange(bs - 2.5, bs - 0.3 - length + 1e-9, 0.05):
+        w = (t >= s0) & (t < s0 + length)
+        if w.sum() < 5:
+            continue
+        sc = sig.gy.values[w].std() + V[w].std(0).sum()
+        if best is None or sc < best[0]:
+            best = (sc, w)
+    return best[1] if best else (t >= bs - 1.5) & (t < bs - 1.0)
+
+
+def shank_tilt(sig, bw):
+    """Angle (deg) between the leg acceleration vector and its baseline direction."""
+    V = sig[["leg_x", "leg_y", "leg_z"]].values
+    v0 = V[bw].mean(0)
+    c = (V @ v0) / (np.linalg.norm(V, axis=1) * np.linalg.norm(v0))
+    return np.degrees(np.arccos(np.clip(c, -1, 1)))
+
+
+def heel_off_candidates(sig, bs, p):
+    """Leg-only heel-off detectors (independent of L5). Returns dict with the three
+    candidate times and the info needed to plot them."""
+    fs, t, gy = p["fs"], sig.t.values, sig.gy.values
+    bw = leg_baseline(sig, bs)
+    g0, gsd = gy[bw].mean(), gy[bw].std()
+    n = max(1, int(round(p["ho_dur"] * fs)))
+    out = dict(g0=g0, bw=bw)
+
+    # 1) first sustained departure of the leg vertical signal from baseline
+    thr_v = max(p["ho_k"] * gsd, p["ho_min_v"])
+    seg = np.flatnonzero((t > bs - 1.0) & (t < bs + 1.0))
+    ob = np.abs(gy[seg] - g0) > thr_v
+    out["depart"], out["thr_v"] = np.nan, thr_v
+    for i in range(len(seg) - n + 1):
+        if ob[i:i + n].all():
+            out["depart"] = t[seg[i]]; break
+
+    # 2) start of the rise to the first leg vertical peak above baseline + ho_thr
+    out["rise"] = np.nan
+    seg = np.flatnonzero((t > bs - 1.0) & (t < bs + 1.5))
     above = gy[seg] - g0 > p["ho_thr"]
-    if not above.any():
-        return np.nan
-    pk = seg[np.argmax(above)]
-    while pk + 1 < len(gy) and gy[pk + 1] > gy[pk]:
-        pk += 1
-    j = pk
-    while j > 0 and gy[j - 1] < gy[j]:
-        j -= 1
-    return t[j]
+    if above.any():
+        pk = seg[np.argmax(above)]
+        while pk + 1 < len(gy) and gy[pk + 1] > gy[pk]:
+            pk += 1
+        j = pk
+        while j > 0 and gy[j - 1] < gy[j]:
+            j -= 1
+        out["rise"] = t[j]
+
+    # 3) shank tilt (3-axis gravity direction) leaves its baseline
+    ang = shank_tilt(sig, bw)
+    thr_a = max(p["ho_k"] * ang[bw].std(), p["ho_min_deg"])
+    seg = np.flatnonzero((t > bs - 1.0) & (t < bs + 1.0))
+    ob = ang[seg] > thr_a
+    out["tilt"], out["thr_a"], out["ang"] = np.nan, thr_a, ang
+    for i in range(len(seg) - n + 1):
+        if ob[i:i + n].all():
+            out["tilt"] = t[seg[i]]; break
+    return out
+
+
+def detect_heel_off(sig, bs, p):
+    return heel_off_candidates(sig, bs, p)[p["ho_method"]]
 
 
 def apa_metrics(sig, ho, p):
@@ -157,7 +208,7 @@ def apa_metrics(sig, ho, p):
         b0, sd = s[bw].mean(), max(s[bw].std(), 0.01)
         thr = max(p["k_sd"] * sd, p["min_abs"])
         if name == "AP":
-            d = 1
+            d = p.get("ap_dir", 1)   # +1 forward step, −1 backward step
         else:  # dominant direction: largest deviation in [ho-0.8, ho-0.2]
             ww = (t > ho - 0.8) & (t < ho - 0.2)
             dv = s[ww] - b0
@@ -221,7 +272,7 @@ def run_pipeline(L, G, p):
             kind = FWD if i % 2 == 1 else BWD   # first step after the sync event = forward
         else:
             kind = classify_burst(sig, bs, p)
-        ho = detect_heel_off(sig, bs, p) if kind == FWD else np.nan
+        ho = detect_heel_off(sig, bs, p)
         ev.append(dict(event=i, burst_start_s=round(bs, 2), burst_end_s=round(be, 2),
                        type=kind, HO_auto_s=round(ho, 3) if not np.isnan(ho) else np.nan))
     return dict(t_jump=tj, t_jump_end=tj_end, lag_auto=lag_auto, sig=sig, events=pd.DataFrame(ev))
@@ -237,7 +288,7 @@ def main():
     from plotly.subplots import make_subplots
     import plotly.colors as pc
 
-    st.set_page_config(page_title="Forward-step APA", layout="wide")
+    st.set_page_config(page_title="Step APA", layout="wide")
 
     def stretch(fn, *a, **k):
         """Works with new (width='stretch') and older (use_container_width) Streamlit."""
@@ -246,13 +297,19 @@ def main():
         except TypeError:
             return fn(*a, use_container_width=True, **k)
 
-    st.title("Forward-step APA — L5 × leg")
-
     # ---------------- Sidebar ----------------
     sb = st.sidebar
     sb.header("Files")
     fL5 = sb.file_uploader("L5 accelerometer", type=["txt", "csv"])
     fLeg = sb.file_uploader("Leg accelerometer", type=["txt", "csv"])
+
+    sb.header("Analysis")
+    sel_type = sb.radio("Steps to analyse", [FWD, BWD], 0, horizontal=True,
+                        format_func=lambda x: x.capitalize(),
+                        help="All forward steps together, or all backward steps together. "
+                             "For backward steps the AP APA is searched in the backward (−) direction.")
+    Sel = sel_type.capitalize()
+    st.title(f"{Sel}-step APA — L5 × leg")
 
     sb.header("Axes")
     c1, c2 = sb.columns(2)
@@ -285,7 +342,31 @@ def main():
                                "they alternate. Automatic: sign of the largest L5 AP excursion "
                                "around the step.")
     class_thr = sb.slider("AP threshold for automatic labelling (m/s²)", 0.3, 2.0, 0.8, 0.1)
-    ho_thr = sb.slider("Heel-off: minimum leg peak above baseline (m/s²)", 0.3, 3.0, 0.8, 0.1)
+
+    sb.header("Heel-off (leg sensor only)")
+    ho_label = sb.radio(
+        "Heel-off criterion",
+        ["Leg vertical: first departure from baseline", "Leg vertical: start of the main rise",
+         "Shank tilt (3 axes)"], 1,
+        help="All three use only the leg sensor (never L5). "
+             "First departure: first moment the leg vertical signal leaves baseline ± threshold "
+             "and stays out for the minimum time. "
+             "Main rise: start of the rise to the first big positive leg vertical peak "
+             "(tends to be later, closer to toe-off). "
+             "Shank tilt: first moment the leg's gravity direction tilts away from its baseline "
+             "by more than the threshold (earliest).")
+    ho_method = {"Leg vertical: first departure from baseline": "depart",
+                 "Leg vertical: start of the main rise": "rise",
+                 "Shank tilt (3 axes)": "tilt"}[ho_label]
+    ho_k = sb.slider("Threshold = k × leg baseline SD", 1.0, 10.0, 5.0, 0.5)
+    ho_min_v = sb.slider("Minimum vertical threshold (m/s²)", 0.05, 1.0, 0.15, 0.05,
+                         disabled=ho_method != "depart")
+    ho_thr = sb.slider("Main rise: minimum peak above baseline (m/s²)", 0.3, 3.0, 0.8, 0.1,
+                       disabled=ho_method != "rise")
+    ho_min_deg = sb.slider("Minimum tilt threshold (°)", 0.5, 10.0, 2.0, 0.5,
+                           disabled=ho_method != "tilt")
+    ho_dur = sb.slider("Minimum time outside the threshold (s)", 0.01, 0.2, 0.05, 0.01,
+                       disabled=ho_method == "rise")
 
     sb.header("APA onset")
     onset_label = sb.radio(
@@ -318,6 +399,8 @@ def main():
              sync_thr=sync_thr, lag=lag_val if lag_manual else None,
              burst_thr=burst_thr, burst_merge=burst_merge, burst_min_dur=burst_min_dur,
              post_jump=post_jump, class_thr=class_thr, ho_thr=ho_thr,
+             ho_method=ho_method, ho_k=ho_k, ho_min_v=ho_min_v, ho_min_deg=ho_min_deg,
+             ho_dur=ho_dur, ap_dir=1 if sel_type == FWD else -1,
              class_mode="alternating" if class_mode == "Alternating" else "auto",
              base_len=base_len, k_sd=k_sd, min_abs=min_abs, min_dur=min_dur,
              onset_method=onset_method, peak_frac=peak_frac)
@@ -362,11 +445,8 @@ def main():
         },
         disabled=["event", "burst_start_s", "burst_end_s", "HO_auto_s"], key="ev_editor")
 
-    for i, r in ev.iterrows():
-        if r.type == FWD and np.isnan(r.HO_auto_s):
-            ev.at[i, "HO_auto_s"] = round(detect_heel_off(sig, r.burst_start_s, p), 3)
     ev["HO_s"] = ev.HO_manual_s.fillna(ev.HO_auto_s)
-    fwd = ev[(ev.type == FWD) & ev.HO_s.notna()].reset_index(drop=True)
+    fwd = ev[(ev.type == sel_type) & ev.HO_s.notna()].reset_index(drop=True)
 
     rows, bws = [], {}
     for k, r in fwd.iterrows():
@@ -388,8 +468,9 @@ def main():
                           line_width=0, row="all", col=1)
     fig.add_vrect(x0=R["t_jump"] - p["lag"], x1=R["t_jump_end"] - p["lag"],
                   fillcolor="rgba(148,103,189,0.18)", line_width=0, row="all", col=1)
-    for _, r in res.iterrows():
+    for _, r in ev[ev.type.isin([FWD, BWD]) & ev.HO_s.notna()].iterrows():
         fig.add_vline(x=r.HO_s, line=dict(color="red", dash="dash", width=1))
+    for _, r in res.iterrows():
         if not np.isnan(r.get("ML_onset_s", np.nan)):
             fig.add_vline(x=r.ML_onset_s, line=dict(color="#1f77b4", dash="dot", width=1), row=2, col=1)
         if not np.isnan(r.get("AP_onset_s", np.nan)):
@@ -398,15 +479,15 @@ def main():
     fig.update_xaxes(title_text="Time (s)", row=3, col=1)
     stretch(st.plotly_chart, fig)
     st.caption("Green = forward step · red = backward step · purple = sync event · red dashed = heel-off · "
-               "dotted = APA onset (ML blue, AP orange).")
+               f"dotted = APA onset of the analysed ({sel_type}) steps (ML blue, AP orange).")
 
     if res.empty:
-        st.warning("No forward step with a heel-off. Check the event table.")
+        st.warning(f"No {sel_type} step with a heel-off. Check the event table.")
         st.stop()
 
     # ---------------- 3. Single step ----------------
     st.subheader("3. Single step")
-    k = st.selectbox("Forward step no.", res.step.tolist())
+    k = st.selectbox(f"{Sel} step no.", res.step.tolist())
     r = res[res.step == k].iloc[0]
     pre, pos = st.slider("Window relative to heel-off (s)", -3.0, 2.0, (-1.8, 1.0), 0.1)
     w = (t > r.HO_s + pre) & (t < r.HO_s + pos)
@@ -431,6 +512,20 @@ def main():
                 fig.add_vline(x=x0, line=dict(color=cor, dash="dot"), row=i, col=1)
                 fig.add_scatter(x=[r[f"{nm}_peak_rel_HO_ms"] / 1000], y=[r[f"{nm}_peak_m_s2"]],
                                 mode="markers", marker=dict(size=10, color=cor, symbol="x"), row=i, col=1)
+    # heel-off candidates (leg-only detectors) for this step
+    bs_k = ev.loc[ev.event == r.event, "burst_start_s"].iloc[0]
+    cand = heel_off_candidates(sig, bs_k, p)
+    gb = sig.gy.values[bw].mean()
+    if ho_method == "depart":
+        fig.add_hrect(y0=cand["g0"] - gb - cand["thr_v"], y1=cand["g0"] - gb + cand["thr_v"],
+                      fillcolor="rgba(128,128,128,0.28)", line_width=0, row=1, col=1)
+    cmap = {"depart": ("green", "departure"), "rise": ("magenta", "main rise"), "tilt": ("teal", "tilt")}
+    for key, (cc, lab) in cmap.items():
+        if not np.isnan(cand[key]):
+            fig.add_vline(x=cand[key] - r.HO_s, line=dict(color=cc, width=1.5,
+                          dash="solid" if key == ho_method else "dot"), row=1, col=1)
+            fig.add_annotation(x=cand[key] - r.HO_s, y=1, yref="y domain", text=lab, showarrow=False,
+                               font=dict(size=10, color=cc), yanchor="bottom", row=1, col=1)
     fig.add_vline(x=0, line=dict(color="red", dash="dash"))
     fig.add_vrect(x0=t[bw][0] - r.HO_s, x1=t[bw][-1] - r.HO_s, fillcolor="rgba(0,128,255,0.08)",
                   line_width=0, row="all", col=1)
@@ -438,10 +533,20 @@ def main():
     fig.update_xaxes(title_text="Time relative to heel-off (s)", row=3, col=1)
     stretch(st.plotly_chart, fig)
     st.caption("Blue band = baseline · grey band = threshold · yellow = APA (onset → heel-off) · "
-               "dotted = APA onset · × = peak · red dashed = heel-off.")
+               "dotted = APA onset · × = peak · red dashed = heel-off used. Leg panel: the three "
+               "leg-only heel-off candidates (green = departure, magenta = main rise, teal = tilt; "
+               "solid = the criterion in use).")
+    with st.expander("Shank tilt for this step"):
+        f2 = go.Figure()
+        f2.add_scatter(x=tt, y=cand["ang"][w], line=dict(color="teal"))
+        f2.add_hrect(y0=0, y1=cand["thr_a"], fillcolor="rgba(128,128,128,0.25)", line_width=0)
+        f2.add_vline(x=0, line=dict(color="red", dash="dash"))
+        f2.update_layout(height=260, margin=dict(t=10, b=40), xaxis_title="Time relative to heel-off (s)",
+                         yaxis_title="Tilt (°)")
+        stretch(st.plotly_chart, f2)
 
     # ---------------- 4. All steps aligned + mean ----------------
-    st.subheader("4. All forward steps aligned to heel-off")
+    st.subheader(f"4. All {sel_type} steps aligned to heel-off")
     tt = np.arange(pre, pos, 1 / fs)
     colors = pc.qualitative.Plotly + pc.qualitative.D3
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
@@ -586,12 +691,12 @@ def main():
     stretch(st.dataframe, res[show], hide_index=True)
     num = [c for c in show if c not in ("step", "event", "HO_s", "HO_source", "ML_direction")]
     summ = res[num].agg(["mean", "std", "median", "min", "max"]).round(2).T
-    st.markdown("**Summary (all forward steps)**")
+    st.markdown(f"**Summary (all {sel_type} steps)**")
     stretch(st.dataframe, summ)
 
     buf = io.StringIO()
     res.to_csv(buf, index=False)
-    st.download_button("Download results (CSV)", buf.getvalue(), "apa_results.csv", "text/csv")
+    st.download_button("Download results (CSV)", buf.getvalue(), f"apa_results_{sel_type}.csv", "text/csv")
 
     with st.expander("Method notes"):
         st.markdown(
@@ -600,8 +705,14 @@ def main():
             "- **Steps:** activity bursts on the leg vertical axis, numbered after the sync event; the first "
             "one is forward and they alternate (or, in automatic mode, from the sign of the largest "
             "L5 AP excursion).\n"
-            "- **Heel-off:** from the forward AP peak − 0.3 s, first leg vertical peak above baseline + "
-            "threshold; heel-off = start of that rise.\n"
+            "- **Heel-off (leg sensor only, never L5):** leg baseline = quietest 0.5 s between 2.5 and "
+            "0.3 s before the step burst. (a) *First departure*: first moment the leg "
+            "vertical signal leaves baseline ± max(k·SD, minimum) and stays out for the minimum time. "
+            "(b) *Main rise* (default): start of the rise to the first leg vertical peak above baseline + "
+            "threshold. (c) *Shank tilt*: first moment the angle between the leg acceleration vector "
+            "(3 axes, 3 Hz low-pass) and its baseline direction exceeds max(k·SD, minimum).\n"
+            "- **Forward / backward:** the same pipeline is applied to the chosen step type; for "
+            "backward steps the AP APA is searched in the backward (−) direction.\n"
             "- **Baseline:** quietest window before heel-off (between HO − 2.6 s and HO − 0.6 s).\n"
             "- **APA peak:** largest deviation in the dominant direction between the end of the "
             "baseline and heel-off.\n"
