@@ -565,11 +565,12 @@ def main():
     # ---------------- 5. ML x AP and resultant ----------------
     st.subheader("5. ML × AP path and horizontal resultant")
     amp_norm = st.radio(
-        "Amplitude", ["Absolute (m/s²)", "Normalised to each step's peak (0–1)"], 1, horizontal=True,
+        "ML × AP amplitude", ["Absolute (m/s²)", "Normalised to each step's peak (0–1)"], 1, horizontal=True,
         help="Normalised: each step is divided by its own peak horizontal resultant, so steps are "
-             "compared by shape and direction. Display only — the results table stays in m/s².").startswith("Normalised")
-    st.caption("Time is normalised: each step runs from its APA onset (0 %, earliest of ML/AP onset) "
-               "to heel-off (100 %), so steps with APAs of different durations are averaged phase by phase.")
+             "compared by shape and direction. Applies to the ML × AP plot only; the resultant plot and the "
+             "results table stay in m/s².").startswith("Normalised")
+    st.caption("ML × AP plot: time is normalised — each step runs from its APA onset (0 %, earliest of "
+               "ML/AP onset) to heel-off (100 %), so APAs of different durations are averaged phase by phase.")
 
     pct = np.linspace(0, 100, 101)
     ml_d, ap_d = lowpass(sig.ml.values, 3.0, fs), lowpass(sig.ap.values, 3.0, fs)   # display smoothing
@@ -589,7 +590,6 @@ def main():
         st.caption(f"Step(s) {', '.join(map(str, skipped))} have no APA onset and are not shown here.")
     unit_lbl = "re. step peak" if amp_norm else "m/s², re. baseline"
 
-    c1, c2 = st.columns([1, 1])
     # --- ML x AP path: individual steps faint, mean bold, SD ellipses at 25/50/75/100 %
     fig = go.Figure()
     for j, (rr, x, y, _, _, tip) in enumerate(curves):
@@ -626,33 +626,42 @@ def main():
                      scaleanchor="x", scaleratio=1)
     fig.update_layout(title="ML × AP path (onset → heel-off)", height=560,
                       margin=dict(t=50, b=40), legend=dict(groupclick="togglegroup"))
-    with c1:
-        stretch(st.plotly_chart, fig)
+    stretch(st.plotly_chart, fig)
+    st.caption("L5 acceleration path in the horizontal plane (smoothed at 3 Hz for display; equal axis "
+               "scales) · thin lines = steps · black = mean path · blue ellipses = ± SD of ML and AP at "
+               "25, 50, 75 and 100 % of the APA. Click a step in the legend to hide it.")
 
-    # --- horizontal resultant over the normalised APA
+    # --- horizontal resultant: same absolute window as section 4, in m/s² (no normalisation)
     fig = go.Figure()
+    on_all = [v for v in mean_on.values() if not np.isnan(v)]
+    if on_all:
+        fig.add_vrect(x0=min(on_all), x1=0, fillcolor="rgba(255,215,0,0.20)", line_width=0)
     M = []
-    for j, (rr, _, _, xr, yr, tip) in enumerate(curves):
+    for j, (_, rr) in enumerate(res.iterrows()):
         cor = colors[j % len(colors)]
-        rres = np.hypot(xr, yr); M.append(rres)
-        fig.add_scatter(x=pct, y=rres, line=dict(color=cor, width=1.2), opacity=0.45,
+        bw_ = bws[rr.step]
+        x = np.interp(tt + rr.HO_s, t, sig.ml.values) - sig.ml.values[bw_].mean()
+        y = np.interp(tt + rr.HO_s, t, sig.ap.values) - sig.ap.values[bw_].mean()
+        rres = np.hypot(x, y); M.append(rres)
+        fig.add_scatter(x=tt, y=rres, line=dict(color=cor, width=1.2), opacity=0.75,
                         name=f"Step {rr.step}", legendgroup=f"s{rr.step}")
-    if M:
-        M = np.array(M); mu, sd = M.mean(0), M.std(0)
-        fig.add_scatter(x=np.r_[pct, pct[::-1]], y=np.r_[mu + sd, (mu - sd)[::-1]], fill="toself",
-                        fillcolor="rgba(0,0,0,0.08)", line=dict(width=0), hoverinfo="skip",
-                        name="Mean ± SD", legendgroup="mean")
-        fig.add_scatter(x=pct, y=mu, line=dict(color="black", width=3), name=f"Mean (n={len(M)})",
-                        legendgroup="mean")
-    fig.update_layout(title="Horizontal resultant √(ML² + AP²)", height=560,
+        fig.add_scatter(x=[rr.RES_peak_rel_HO_ms / 1000], y=[rr.RES_peak_m_s2], mode="markers",
+                        marker=dict(color=cor, size=9, symbol="x"), legendgroup=f"s{rr.step}",
+                        showlegend=False, hoverinfo="skip")
+    M = np.array(M); mu, sd = M.mean(0), M.std(0)
+    fig.add_scatter(x=np.r_[tt, tt[::-1]], y=np.r_[mu + sd, (mu - sd)[::-1]], fill="toself",
+                    fillcolor="rgba(0,0,0,0.08)", line=dict(width=0), hoverinfo="skip",
+                    name="Mean ± SD", legendgroup="mean")
+    fig.add_scatter(x=tt, y=mu, line=dict(color="black", width=3), name=f"Mean (n={len(M)})",
+                    legendgroup="mean")
+    fig.add_vline(x=0, line=dict(color="red", dash="dash"))
+    fig.update_layout(title="Horizontal resultant √(ML² + AP²)", height=450,
                       margin=dict(t=50, b=40), legend=dict(groupclick="togglegroup"),
-                      xaxis_title="APA phase (% from onset to heel-off)", yaxis_title=unit_lbl)
-    with c2:
-        stretch(st.plotly_chart, fig)
-    st.caption("Left: L5 acceleration path in the horizontal plane (paths smoothed at 3 Hz for display; "
-               "equal axis scales) · thin lines = steps · black = mean path · blue ellipses = ± SD of ML "
-               "and AP at 25, 50, 75 and 100 % of the APA. Right: size of the horizontal acceleration "
-               "over the APA. Click a step in a legend to hide it.")
+                      xaxis_title="Time relative to heel-off (s)", yaxis_title="m/s² (re. baseline)")
+    stretch(st.plotly_chart, fig)
+    st.caption("Same time window as section 4, absolute values (no normalisation) · yellow = APA "
+               "(earliest mean onset → heel-off) · × = peak resultant before heel-off for each step · "
+               "red dashed = heel-off.")
 
     # ---------------- 6. Results ----------------
     st.subheader("6. Results")
