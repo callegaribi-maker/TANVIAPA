@@ -38,20 +38,31 @@ def sampling_info(d):
                 fs_med=1000 / np.median(dt), dt_max_ms=dt.max())
 
 
-def find_jump_and_lag(L, G, fs, search_until, max_lag=0.5):
-    """Jump = largest leg |a| before `search_until` s. Lag from cross-correlation of the
-    acceleration norms in a ±0.9 s window around the jump (lag > 0: leg lags L5)."""
+def find_jump_and_lag(L, G, fs, sync_thr, max_lag=0.5):
+    """Sync event = FIRST time the leg acceleration norm departs from its initial resting value
+    by more than `sync_thr` m/s². Lag from cross-correlation of the acceleration norms of both
+    sensors in a window around that event (lag > 0: leg lags L5)."""
     t = np.arange(0, min(L.t.iloc[-1], G.t.iloc[-1]), 1 / fs)
     mL = np.sqrt(sum(np.interp(t, L.t, L[a]) ** 2 for a in "xyz"))
     mG = np.sqrt(sum(np.interp(t, G.t, G[a]) ** 2 for a in "xyz"))
-    sel = t < search_until
-    tj = t[sel][np.argmax(mG[sel])]
-    w = (t > tj - 0.9) & (t < tj + 0.8)
+    rest = np.median(mG[: int(fs)])
+    dev = np.abs(lowpass(mG, 20, fs) - rest) > sync_thr
+    if not dev.any():
+        return np.nan, 0.0, np.nan
+    i0 = int(np.argmax(dev))
+    t0 = t[i0]
+    # end of the sync burst: first 0.4 s of quiet after it
+    quiet = np.abs(lowpass(mG, 5, fs) - rest) < 0.5
+    j = i0
+    while j < len(t) - int(0.4 * fs) and not quiet[j:j + int(0.4 * fs)].all():
+        j += 1
+    t_end = t[j]
+    w = (t > t0 - 0.5) & (t < t_end + 0.3)
     a_, b_ = mL[w] - mL[w].mean(), mG[w] - mG[w].mean()
     c = np.correlate(b_, a_, "full")
     lags = np.arange(-len(a_) + 1, len(a_)) / fs
     k = np.abs(lags) <= max_lag
-    return tj, lags[k][np.argmax(c[k])]
+    return t0, lags[k][np.argmax(c[k])], t_end
 
 
 def build_signals(L, G, p):
@@ -199,23 +210,21 @@ def apa_metrics(sig, ho, p):
 
 
 def run_pipeline(L, G, p):
-    tj, lag_auto = find_jump_and_lag(L, G, p["fs"], p["jump_until"])
+    tj, lag_auto, tj_end = find_jump_and_lag(L, G, p["fs"], p["sync_thr"])
     if p.get("lag") is None:
         p["lag"] = lag_auto
     sig = build_signals(L, G, p)
-    bursts = detect_bursts(sig, p, tj + p["post_jump"])
+    bursts = detect_bursts(sig, p, tj_end - p["lag"] + p["post_jump"])
     ev = []
     for i, (bs, be) in enumerate(bursts, 1):
         if p["class_mode"] == "alternating":
-            first = p.get("first_step", BWD)
-            other = FWD if first == BWD else BWD
-            kind = first if (i - 1) % 2 == 0 else other
+            kind = FWD if i % 2 == 1 else BWD   # first step after the sync event = forward
         else:
             kind = classify_burst(sig, bs, p)
         ho = detect_heel_off(sig, bs, p) if kind == FWD else np.nan
         ev.append(dict(event=i, burst_start_s=round(bs, 2), burst_end_s=round(be, 2),
                        type=kind, HO_auto_s=round(ho, 3) if not np.isnan(ho) else np.nan))
-    return dict(t_jump=tj, lag_auto=lag_auto, sig=sig, events=pd.DataFrame(ev))
+    return dict(t_jump=tj, t_jump_end=tj_end, lag_auto=lag_auto, sig=sig, events=pd.DataFrame(ev))
 
 
 # =============================================================================
@@ -259,7 +268,9 @@ def main():
     fs = sb.number_input("Resampling rate (Hz)", 50, 500, 100, 10)
     fc_l5 = sb.slider("L5 low-pass cut-off (Hz)", 1.0, 20.0, 5.0, 0.5)
     fc_leg = sb.slider("Leg low-pass cut-off (Hz)", 2.0, 30.0, 10.0, 0.5)
-    jump_until = sb.number_input("Search for the jump up to (s)", 2.0, 60.0, 20.0, 1.0)
+    sync_thr = sb.slider("Sync event: leg |a| deviation threshold (m/s²)", 0.5, 5.0, 1.5, 0.1,
+                         help="The sync event is the FIRST disturbance of the leg signal larger "
+                              "than this value (the jump/tap at the start of the recording).")
     lag_manual = sb.checkbox("Set lag manually")
     lag_val = sb.number_input("Leg lag relative to L5 (s)", -2.0, 2.0, 0.19, 0.01,
                               disabled=not lag_manual)
@@ -268,11 +279,11 @@ def main():
     burst_thr = sb.slider("Leg activity threshold (m/s²)", 0.05, 1.5, 0.25, 0.05)
     burst_merge = sb.slider("Merge bursts closer than (s)", 0.1, 2.0, 0.8, 0.1)
     burst_min_dur = sb.slider("Minimum burst duration (s)", 0.1, 1.5, 0.3, 0.05)
-    post_jump = sb.slider("Ignore the first X s after the jump", 0.0, 3.0, 0.5, 0.1)
+    post_jump = sb.slider("Ignore the first X s after the sync event", 0.0, 3.0, 0.5, 0.1)
     class_mode = sb.radio("Forward/backward labelling", ["Alternating", "Automatic (AP)"], 0,
-                          help="Alternating: steps alternate starting from the type chosen below. "
-                               "Automatic: sign of the largest L5 AP excursion around the step.")
-    first_step = sb.selectbox("First step after the jump (alternating mode)", [BWD, FWD], 0)
+                          help="Alternating: the first step after the sync event is forward, then "
+                               "they alternate. Automatic: sign of the largest L5 AP excursion "
+                               "around the step.")
     class_thr = sb.slider("AP threshold for automatic labelling (m/s²)", 0.3, 2.0, 0.8, 0.1)
     ho_thr = sb.slider("Heel-off: minimum leg peak above baseline (m/s²)", 0.3, 3.0, 0.8, 0.1)
 
@@ -304,11 +315,10 @@ def main():
     L, G = read_acc(fL5), read_acc(fLeg)
     p = dict(fs=fs, fc_l5=fc_l5, fc_leg=fc_leg, ml_axis=ml_axis, ml_sign=ml_sign,
              ap_axis=ap_axis, ap_sign=ap_sign, leg_axis=leg_axis,
-             jump_until=jump_until, lag=lag_val if lag_manual else None,
+             sync_thr=sync_thr, lag=lag_val if lag_manual else None,
              burst_thr=burst_thr, burst_merge=burst_merge, burst_min_dur=burst_min_dur,
              post_jump=post_jump, class_thr=class_thr, ho_thr=ho_thr,
              class_mode="alternating" if class_mode == "Alternating" else "auto",
-             first_step=first_step,
              base_len=base_len, k_sd=k_sd, min_abs=min_abs, min_dur=min_dur,
              onset_method=onset_method, peak_frac=peak_frac)
     R = run_pipeline(L, G, p)
@@ -320,12 +330,12 @@ def main():
     c = st.columns(4)
     c[0].metric("L5: samples / median rate", f"{iL['n']} / {iL['fs_med']:.0f} Hz")
     c[1].metric("Leg: samples / median rate", f"{iG['n']} / {iG['fs_med']:.0f} Hz")
-    c[2].metric("Jump (leg)", f"{R['t_jump']:.2f} s")
+    c[2].metric("Sync event (leg)", f"{R['t_jump']:.2f}–{R['t_jump_end']:.2f} s")
     c[3].metric("Lag used (leg behind L5)", f"{p['lag']:.3f} s",
                 f"auto = {R['lag_auto']:.3f} s", delta_color="off")
 
-    with st.expander("Check the alignment at the jump", expanded=False):
-        w = (t > R["t_jump"] - p["lag"] - 1.0) & (t < R["t_jump"] - p["lag"] + 1.0)
+    with st.expander("Check the alignment at the sync event", expanded=True):
+        w = (t > R["t_jump"] - p["lag"] - 1.0) & (t < R["t_jump_end"] - p["lag"] + 1.0)
         mL = np.sqrt(sum(np.interp(t, L.t, L[a]) ** 2 for a in "xyz"))
         mG = np.sqrt(sum(np.interp(t, G.t - p["lag"], G[a]) ** 2 for a in "xyz"))
         fig = go.Figure()
@@ -376,7 +386,8 @@ def main():
         if r.type in shade:
             fig.add_vrect(x0=r.burst_start_s, x1=r.burst_end_s, fillcolor=shade[r.type],
                           line_width=0, row="all", col=1)
-    fig.add_vline(x=R["t_jump"] - p["lag"], line=dict(color="purple", dash="dot"))
+    fig.add_vrect(x0=R["t_jump"] - p["lag"], x1=R["t_jump_end"] - p["lag"],
+                  fillcolor="rgba(148,103,189,0.18)", line_width=0, row="all", col=1)
     for _, r in res.iterrows():
         fig.add_vline(x=r.HO_s, line=dict(color="red", dash="dash", width=1))
         if not np.isnan(r.get("ML_onset_s", np.nan)):
@@ -386,7 +397,7 @@ def main():
     fig.update_layout(height=650, showlegend=False, margin=dict(t=40, b=40))
     fig.update_xaxes(title_text="Time (s)", row=3, col=1)
     stretch(st.plotly_chart, fig)
-    st.caption("Green = forward step · red = backward step · purple = jump · red dashed = heel-off · "
+    st.caption("Green = forward step · red = backward step · purple = sync event · red dashed = heel-off · "
                "dotted = APA onset (ML blue, AP orange).")
 
     if res.empty:
@@ -567,13 +578,13 @@ def main():
 
     # ---------------- 6. Results ----------------
     st.subheader("6. Results")
-    show = ["step", "HO_s", "HO_source",
+    show = ["step", "event", "HO_s", "HO_source",
             "ML_direction", "ML_onset_rel_HO_ms", "ML_peak_m_s2", "ML_peak_rel_HO_ms", "ML_dv_m_s",
             "AP_onset_rel_HO_ms", "AP_peak_m_s2", "AP_peak_rel_HO_ms", "AP_dv_m_s",
             "RES_peak_m_s2", "RES_peak_rel_HO_ms", "RES_angle_deg"]
     show = [c for c in show if c in res.columns]
     stretch(st.dataframe, res[show], hide_index=True)
-    num = [c for c in show if c not in ("step", "HO_s", "HO_source", "ML_direction")]
+    num = [c for c in show if c not in ("step", "event", "HO_s", "HO_source", "ML_direction")]
     summ = res[num].agg(["mean", "std", "median", "min", "max"]).round(2).T
     st.markdown("**Summary (all forward steps)**")
     stretch(st.dataframe, summ)
@@ -585,9 +596,10 @@ def main():
     with st.expander("Method notes"):
         st.markdown(
             "- **Synchronisation:** cross-correlation of the acceleration norm |a| of both sensors "
-            "around the largest leg impact (the jump).\n"
-            "- **Steps:** activity bursts on the leg vertical axis; forward/backward alternate from "
-            "the chosen first step (or, in automatic mode, from the sign of the largest L5 AP excursion).\n"
+            "around the FIRST disturbance of the leg signal (the sync jump/tap at the start).\n"
+            "- **Steps:** activity bursts on the leg vertical axis, numbered after the sync event; the first "
+            "one is forward and they alternate (or, in automatic mode, from the sign of the largest "
+            "L5 AP excursion).\n"
             "- **Heel-off:** from the forward AP peak − 0.3 s, first leg vertical peak above baseline + "
             "threshold; heel-off = start of that rise.\n"
             "- **Baseline:** quietest window before heel-off (between HO − 2.6 s and HO − 0.6 s).\n"
