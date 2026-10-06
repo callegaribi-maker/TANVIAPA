@@ -311,83 +311,74 @@ def main():
     Sel = sel_type.capitalize()
     st.title(f"{Sel}-step APA — L5 × leg")
 
-    sb.header("Axes")
-    c1, c2 = sb.columns(2)
-    ml_axis = c1.selectbox("L5 ML axis", ["x", "y", "z"], 0)
-    ml_sign = c2.selectbox("ML sign", [1, -1], 0)
-    ap_axis = c1.selectbox("L5 AP axis", ["x", "y", "z"], 2)
-    ap_sign = c2.selectbox("AP sign (+ = forward)", [1, -1], 1,
-                           help="Phone on L5 with the screen facing out: the z axis points "
-                                "backwards, so use −1 to make + forward.")
-    leg_axis = c1.selectbox("Leg vertical axis", ["x", "y", "z"], 1)
+    HO_OPTS = {"Main rise (leg vertical)": "rise", "First departure (leg vertical)": "depart",
+               "Shank tilt (leg 3 axes)": "tilt"}
+    ho_method = HO_OPTS[sb.radio(
+        "Heel-off criterion", list(HO_OPTS), 0,
+        help="All three use only the leg sensor. Main rise: start of the sharp rise of the leg "
+             "vertical signal. First departure: first time it leaves its resting band. "
+             "Shank tilt: first time the shank tilts beyond the threshold (earliest).")]
+    ON_OPTS = {"Backward from peak": "backward", "Backward from peak (% of peak)": "peak_frac",
+               "First sustained crossing": "first"}
+    onset_method = ON_OPTS[sb.radio(
+        "APA onset criterion", list(ON_OPTS), 0,
+        help="Backward from peak: from the APA peak, go back to the last sample inside the grey "
+             "band. % of peak: same, with a band = % of the peak. First sustained crossing: first "
+             "sample that leaves the band and stays out.")]
+    k_sd = sb.slider("APA threshold = k × baseline SD", 1.0, 10.0, 5.0, 0.5,
+                     help="Width of the grey band around the L5 baseline.")
 
-    sb.header("Filters and synchronisation")
-    fs = sb.number_input("Resampling rate (Hz)", 50, 500, 100, 10)
-    fc_l5 = sb.slider("L5 low-pass cut-off (Hz)", 1.0, 20.0, 5.0, 0.5)
-    fc_leg = sb.slider("Leg low-pass cut-off (Hz)", 2.0, 30.0, 10.0, 0.5)
-    sync_thr = sb.slider("Sync event: leg |a| deviation threshold (m/s²)", 0.5, 5.0, 1.5, 0.1,
-                         help="The sync event is the FIRST disturbance of the leg signal larger "
-                              "than this value (the jump/tap at the start of the recording).")
-    lag_manual = sb.checkbox("Set lag manually")
-    lag_val = sb.number_input("Leg lag relative to L5 (s)", -2.0, 2.0, 0.19, 0.01,
-                              disabled=not lag_manual)
+    sb.markdown("---")
+    sb.caption("Advanced settings — the defaults fit the current protocol.")
 
-    sb.header("Step detection")
-    burst_thr = sb.slider("Leg activity threshold (m/s²)", 0.05, 1.5, 0.25, 0.05)
-    burst_merge = sb.slider("Merge bursts closer than (s)", 0.1, 2.0, 0.8, 0.1)
-    burst_min_dur = sb.slider("Minimum burst duration (s)", 0.1, 1.5, 0.3, 0.05)
-    post_jump = sb.slider("Ignore the first X s after the sync event", 0.0, 3.0, 0.5, 0.1)
-    class_mode = sb.radio("Forward/backward labelling", ["Alternating", "Automatic (AP)"], 0,
-                          help="Alternating: the first step after the sync event is forward, then "
-                               "they alternate. Automatic: sign of the largest L5 AP excursion "
-                               "around the step.")
-    class_thr = sb.slider("AP threshold for automatic labelling (m/s²)", 0.3, 2.0, 0.8, 0.1)
+    with sb.expander("Sensor axes"):
+        c1, c2 = st.columns(2)
+        ml_axis = c1.selectbox("L5 ML axis", ["x", "y", "z"], 0)
+        ml_sign = c2.selectbox("ML sign", [1, -1], 0)
+        ap_axis = c1.selectbox("L5 AP axis", ["x", "y", "z"], 2)
+        ap_sign = c2.selectbox("AP sign (+ = forward)", [1, -1], 1,
+                               help="Phone on L5 with the screen facing out: z points backwards, "
+                                    "so −1 makes + forward.")
+        leg_axis = c1.selectbox("Leg vertical axis", ["x", "y", "z"], 1)
 
-    sb.header("Heel-off (leg sensor only)")
-    ho_label = sb.radio(
-        "Heel-off criterion",
-        ["Leg vertical: first departure from baseline", "Leg vertical: start of the main rise",
-         "Shank tilt (3 axes)"], 1,
-        help="All three use only the leg sensor (never L5). "
-             "First departure: first moment the leg vertical signal leaves baseline ± threshold "
-             "and stays out for the minimum time. "
-             "Main rise: start of the rise to the first big positive leg vertical peak "
-             "(tends to be later, closer to toe-off). "
-             "Shank tilt: first moment the leg's gravity direction tilts away from its baseline "
-             "by more than the threshold (earliest).")
-    ho_method = {"Leg vertical: first departure from baseline": "depart",
-                 "Leg vertical: start of the main rise": "rise",
-                 "Shank tilt (3 axes)": "tilt"}[ho_label]
-    ho_k = sb.slider("Threshold = k × leg baseline SD", 1.0, 10.0, 5.0, 0.5)
-    ho_min_v = sb.slider("Minimum vertical threshold (m/s²)", 0.05, 1.0, 0.15, 0.05,
-                         disabled=ho_method != "depart")
-    ho_thr = sb.slider("Main rise: minimum peak above baseline (m/s²)", 0.3, 3.0, 0.8, 0.1,
-                       disabled=ho_method != "rise")
-    ho_min_deg = sb.slider("Minimum tilt threshold (°)", 0.5, 10.0, 2.0, 0.5,
-                           disabled=ho_method != "tilt")
-    ho_dur = sb.slider("Minimum time outside the threshold (s)", 0.01, 0.2, 0.05, 0.01,
-                       disabled=ho_method == "rise")
+    with sb.expander("Filters and synchronisation"):
+        fs = st.number_input("Resampling rate (Hz)", 50, 500, 100, 10)
+        fc_l5 = st.slider("L5 low-pass (Hz)", 1.0, 20.0, 5.0, 0.5)
+        fc_leg = st.slider("Leg low-pass (Hz)", 2.0, 30.0, 10.0, 0.5)
+        sync_thr = st.slider("Sync event threshold (m/s²)", 0.5, 5.0, 1.5, 0.1,
+                             help="The sync event is the FIRST leg disturbance larger than this.")
+        lag_manual = st.checkbox("Set lag manually")
+        lag_val = st.number_input("Leg lag relative to L5 (s)", -2.0, 2.0, 0.25, 0.01,
+                                  disabled=not lag_manual)
 
-    sb.header("APA onset")
-    onset_label = sb.radio(
-        "Onset criterion",
-        ["Backward from peak (baseline threshold)", "Backward from peak (% of peak)",
-         "First sustained crossing"], 0,
-        help="Backward from peak: start at the APA peak and go back in time to the last sample "
-             "inside the threshold band; earlier oscillations that returned to baseline are ignored. "
-             "% of peak: same, but the threshold is a fraction of the peak amplitude. "
-             "First sustained crossing: first sample after the baseline that leaves the band and "
-             "stays outside for the minimum time.")
-    onset_method = {"Backward from peak (baseline threshold)": "backward",
-                    "Backward from peak (% of peak)": "peak_frac",
-                    "First sustained crossing": "first"}[onset_label]
-    peak_frac = sb.slider("% of peak (for the % criterion)", 5, 50, 15, 5,
-                          disabled=onset_method != "peak_frac") / 100
-    base_len = sb.slider("Baseline window (s)", 0.2, 1.0, 0.5, 0.05)
-    k_sd = sb.slider("Threshold = k × baseline SD", 1.0, 10.0, 5.0, 0.5)
-    min_abs = sb.slider("Minimum absolute threshold (m/s²)", 0.0, 0.5, 0.1, 0.02)
-    min_dur = sb.slider("Minimum time outside the band (s, first-crossing criterion)",
-                        0.02, 0.3, 0.1, 0.01, disabled=onset_method != "first")
+    with sb.expander("Step detection"):
+        burst_thr = st.slider("Leg activity threshold (m/s²)", 0.05, 1.5, 0.25, 0.05)
+        burst_merge = st.slider("Merge bursts closer than (s)", 0.1, 2.0, 0.8, 0.1)
+        burst_min_dur = st.slider("Minimum burst duration (s)", 0.1, 1.5, 0.3, 0.05)
+        post_jump = st.slider("Ignore X s after the sync event", 0.0, 3.0, 0.5, 0.1)
+        class_mode = st.radio("Forward/backward labelling", ["Alternating", "Automatic (AP)"], 0,
+                              help="Alternating: 1st step after the sync event = forward.")
+        class_thr = st.slider("AP threshold, automatic labelling (m/s²)", 0.3, 2.0, 0.8, 0.1,
+                              disabled=class_mode == "Alternating")
+
+    with sb.expander("Heel-off thresholds"):
+        ho_k = st.slider("Leg threshold = k × baseline SD", 1.0, 10.0, 5.0, 0.5,
+                         disabled=ho_method == "rise")
+        ho_thr = st.slider("Main rise: minimum peak (m/s²)", 0.3, 3.0, 0.8, 0.1,
+                           disabled=ho_method != "rise")
+        ho_min_v = st.slider("Departure: minimum threshold (m/s²)", 0.05, 1.0, 0.15, 0.05,
+                             disabled=ho_method != "depart")
+        ho_min_deg = st.slider("Tilt: minimum threshold (°)", 0.5, 10.0, 2.0, 0.5,
+                               disabled=ho_method != "tilt")
+        ho_dur = st.slider("Minimum time outside the threshold (s)", 0.01, 0.2, 0.05, 0.01,
+                           disabled=ho_method == "rise")
+
+    with sb.expander("APA onset details"):
+        base_len = st.slider("Baseline window (s)", 0.2, 1.0, 0.5, 0.05)
+        min_abs = st.slider("Minimum band width (m/s²)", 0.0, 0.5, 0.1, 0.02)
+        peak_frac = st.slider("% of peak", 5, 50, 15, 5, disabled=onset_method != "peak_frac") / 100
+        min_dur = st.slider("Minimum time outside the band (s)", 0.02, 0.3, 0.1, 0.01,
+                            disabled=onset_method != "first")
 
     if not (fL5 and fLeg):
         st.info("Upload both files (L5 and leg) in the sidebar to start.")
@@ -546,6 +537,20 @@ def main():
         stretch(st.plotly_chart, f2)
 
     # ---------------- 4. All steps aligned + mean ----------------
+    # ---- steps excluded by the user (widget lives above the resultant plot; read here) ----
+    res_all = res.copy()
+    excl = [k_ for k_ in st.session_state.get("excl", []) if k_ in res_all.step.tolist()]
+    st.session_state["excl"] = excl   # drop steps that no longer exist (e.g. after switching type)
+    res_all["included"] = ~res_all.step.isin(excl)
+    res = res_all[res_all.included].reset_index(drop=True)
+    if excl:
+        st.info(f"Excluded from sections 4–6: step(s) {', '.join(map(str, excl))}. "
+                "Change this in section 5, above the resultant plot.")
+    if res.empty:
+        st.warning("All steps are excluded.")
+        st.multiselect("Exclude steps", res_all.step.tolist(), key="excl")
+        st.stop()
+
     st.subheader(f"4. All {sel_type} steps aligned to heel-off")
     tt = np.arange(pre, pos, 1 / fs)
     colors = pc.qualitative.Plotly + pc.qualitative.D3
@@ -650,6 +655,11 @@ def main():
                "Axes use the same scale.")
 
     # resultant over time
+    st.multiselect(
+        "Exclude steps (e.g. one that looks very different in the plots); removed from "
+        "sections 4–6, the means and the summary",
+        res_all.step.tolist(), key="excl",
+        format_func=lambda k_: f"Step {k_} (event {int(res_all.loc[res_all.step == k_, 'event'].iloc[0])})")
     fig = go.Figure()
     mean_on_all = min(v for v in mean_on.values() if not np.isnan(v)) if not all(np.isnan(v) for v in mean_on.values()) else np.nan
     if not np.isnan(mean_on_all):
@@ -687,15 +697,15 @@ def main():
             "ML_direction", "ML_onset_rel_HO_ms", "ML_peak_m_s2", "ML_peak_rel_HO_ms", "ML_dv_m_s",
             "AP_onset_rel_HO_ms", "AP_peak_m_s2", "AP_peak_rel_HO_ms", "AP_dv_m_s",
             "RES_peak_m_s2", "RES_peak_rel_HO_ms", "RES_angle_deg"]
-    show = [c for c in show if c in res.columns]
-    stretch(st.dataframe, res[show], hide_index=True)
-    num = [c for c in show if c not in ("step", "event", "HO_s", "HO_source", "ML_direction")]
+    show = ["included"] + [c for c in show if c in res_all.columns]
+    stretch(st.dataframe, res_all[show], hide_index=True)
+    num = [c for c in show if c not in ("included", "step", "event", "HO_s", "HO_source", "ML_direction")]
     summ = res[num].agg(["mean", "std", "median", "min", "max"]).round(2).T
-    st.markdown(f"**Summary (all {sel_type} steps)**")
+    st.markdown(f"**Summary ({sel_type} steps included: n = {len(res)})**")
     stretch(st.dataframe, summ)
 
     buf = io.StringIO()
-    res.to_csv(buf, index=False)
+    res_all.to_csv(buf, index=False)
     st.download_button("Download results (CSV)", buf.getvalue(), f"apa_results_{sel_type}.csv", "text/csv")
 
     with st.expander("Method notes"):
