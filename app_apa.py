@@ -421,14 +421,16 @@ def main():
 
     # ---------------- 2. Events ----------------
     st.subheader("2. Event detection")
-    st.caption("Edit the **type** column (forward / backward / ignore) and, if needed, enter "
-               "**HO_manual_s** to override the automatic heel-off.")
     ev = R["events"].copy()
     if ev.empty:
         st.warning("No steps detected. Lower the leg activity threshold in the sidebar.")
         st.stop()
     ev["HO_manual_s"] = np.nan
-    ev = stretch(
+    ev_box = st.expander("Event table (edit type or set a manual heel-off)", expanded=False)
+    ev_box.caption("Edit the **type** column (forward / backward / ignore) and, if needed, enter "
+                   "**HO_manual_s** to override the automatic heel-off.")
+    with ev_box:
+        ev = stretch(
         st.data_editor, ev, hide_index=True,
         column_config={
             "type": st.column_config.SelectboxColumn(options=[FWD, BWD, IGN, UND]),
@@ -537,21 +539,17 @@ def main():
         stretch(st.plotly_chart, f2)
 
     # ---------------- 4. All steps aligned + mean ----------------
-    # ---- steps excluded by the user (widget lives above the resultant plot; read here) ----
+    st.subheader(f"4. All {sel_type} steps aligned to heel-off")
     res_all = res.copy()
-    excl = [k_ for k_ in st.session_state.get("excl", []) if k_ in res_all.step.tolist()]
-    st.session_state["excl"] = excl   # drop steps that no longer exist (e.g. after switching type)
+    excl = st.multiselect(
+        "Exclude steps from the analysis (sections 4–6, means and summary)",
+        res_all.step.tolist(), key=f"excl_{sel_type}",
+        format_func=lambda k_: f"Step {k_} (event {int(res_all.loc[res_all.step == k_, 'event'].iloc[0])})")
     res_all["included"] = ~res_all.step.isin(excl)
     res = res_all[res_all.included].reset_index(drop=True)
-    if excl:
-        st.info(f"Excluded from sections 4–6: step(s) {', '.join(map(str, excl))}. "
-                "Change this at the top of section 5.")
     if res.empty:
         st.warning("All steps are excluded.")
-        st.multiselect("Exclude steps", res_all.step.tolist(), key="excl")
         st.stop()
-
-    st.subheader(f"4. All {sel_type} steps aligned to heel-off")
     tt = np.arange(pre, pos, 1 / fs)
     colors = pc.qualitative.Plotly + pc.qualitative.D3
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
@@ -609,19 +607,19 @@ def main():
 
     # ---------------- 5. ML x AP and resultant ----------------
     st.subheader("5. ML × AP and horizontal resultant")
-    st.multiselect(
-        "Exclude steps (e.g. one that looks very different in the plots); removed from "
-        "sections 4–6, the means and the summary",
-        res_all.step.tolist(), key="excl",
-        format_func=lambda k_: f"Step {k_} (event {int(res_all.loc[res_all.step == k_, 'event'].iloc[0])})")
     tbase = st.radio(
         "Time base", ["Absolute (aligned to heel-off)", "Normalised (APA onset → heel-off = 0–100 %)"],
-        0, horizontal=True,
+        1, horizontal=True,
         help="Absolute: every step is aligned at heel-off and plotted in seconds; the mean is taken "
              "at the same absolute time. Normalised: each step's APA (earliest of ML/AP onset → "
              "heel-off) is stretched to 0–100 %, so APAs of different durations are averaged "
              "phase by phase.")
     norm = tbase.startswith("Normalised")
+    amp_norm = st.radio(
+        "Amplitude", ["Absolute (m/s²)", "Normalised to each step's peak (0–1)"], 0, horizontal=True,
+        help="Normalised: each step's ML and AP are divided by that step's peak horizontal resultant "
+             "(onset → heel-off), so steps of different size can be compared by shape and direction "
+             "only. Display only — the results table stays in m/s².").startswith("Normalised")
     show_mean_xy = st.checkbox("Show mean trajectory", True)
 
     def base_xy(rr):
@@ -654,6 +652,18 @@ def main():
                            txy * 1000))
         xlab, unit = "Time relative to heel-off (s)", "s"
 
+    if amp_norm:
+        scaled = []
+        for rr, ax_, x, y, tip in curves:
+            if norm:
+                pk = np.hypot(x, y).max()
+            else:
+                pk = rr.RES_peak_m_s2
+            pk = pk if pk and not np.isnan(pk) and pk > 0 else 1.0
+            scaled.append((rr, ax_, x / pk, y / pk, tip))
+        curves = scaled
+    unit_lbl = "re. step peak" if amp_norm else "m/s², re. baseline"
+
     # --- ML x AP path
     fig = go.Figure()
     for j, (rr, ax_, x, y, tip) in enumerate(curves):
@@ -685,8 +695,8 @@ def main():
                         + "<br>ML = %{x:.2f}<br>AP = %{y:.2f}")
     fig.add_hline(y=0, line=dict(color="grey", width=1))
     fig.add_vline(x=0, line=dict(color="grey", width=1))
-    fig.update_xaxes(title_text="L5 ML (m/s², re. baseline)", zeroline=False)
-    fig.update_yaxes(title_text="L5 AP (m/s², re. baseline, + forward)", zeroline=False,
+    fig.update_xaxes(title_text=f"L5 ML ({unit_lbl})", zeroline=False)
+    fig.update_yaxes(title_text=f"L5 AP ({unit_lbl}, + forward)", zeroline=False,
                      scaleanchor="x", scaleratio=1)
     fig.update_layout(height=650, margin=dict(t=30, b=40), legend=dict(groupclick="togglegroup"))
     stretch(st.plotly_chart, fig)
@@ -709,8 +719,8 @@ def main():
         M.append(rres)
         fig.add_scatter(x=ax_, y=rres, line=dict(color=cor, width=1.2), opacity=0.75,
                         name=f"Step {rr.step}", legendgroup=f"s{rr.step}")
-        if norm:
-            ip = int(np.argmax(rres)); px, py = ax_[ip], rres[ip]
+        if norm or amp_norm:
+            ip = int(np.argmax(rres if norm else np.where(ax_ <= 0, rres, -1))); px, py = ax_[ip], rres[ip]
         else:
             px, py = rr.RES_peak_rel_HO_ms / 1000, rr.RES_peak_m_s2
         fig.add_scatter(x=[px], y=[py], mode="markers", marker=dict(color=cor, size=9, symbol="x"),
@@ -726,7 +736,7 @@ def main():
         fig.add_vline(x=0, line=dict(color="red", dash="dash"))
     fig.update_layout(title="Horizontal resultant √(ML² + AP²)", height=450,
                       margin=dict(t=50, b=40), legend=dict(groupclick="togglegroup"),
-                      xaxis_title=xlab, yaxis_title="m/s² (re. baseline)")
+                      xaxis_title=xlab, yaxis_title=unit_lbl)
     stretch(st.plotly_chart, fig)
     st.caption("Size of the L5 horizontal acceleration regardless of direction · × = peak of each step"
                + (" (0 % = APA onset, 100 % = heel-off)." if norm else
