@@ -545,7 +545,7 @@ def main():
     res = res_all[res_all.included].reset_index(drop=True)
     if excl:
         st.info(f"Excluded from sections 4–6: step(s) {', '.join(map(str, excl))}. "
-                "Change this in section 5, above the resultant plot.")
+                "Change this at the top of section 5.")
     if res.empty:
         st.warning("All steps are excluded.")
         st.multiselect("Exclude steps", res_all.step.tolist(), key="excl")
@@ -609,40 +609,80 @@ def main():
 
     # ---------------- 5. ML x AP and resultant ----------------
     st.subheader("5. ML × AP and horizontal resultant")
-    c1, c2 = st.columns([1, 1])
-    a0, a1 = c1.slider("Time window for the ML × AP plot (s, relative to heel-off)",
-                       -2.0, 1.0, (-1.0, 0.0), 0.05)
-    show_mean_xy = c2.checkbox("Show mean trajectory", True)
-    txy = np.arange(a0, a1 + 1e-9, 1 / fs)
-    traj = {}
-    fig = go.Figure()
-    for j, (_, rr) in enumerate(res.iterrows()):
-        cor = colors[j % len(colors)]
+    st.multiselect(
+        "Exclude steps (e.g. one that looks very different in the plots); removed from "
+        "sections 4–6, the means and the summary",
+        res_all.step.tolist(), key="excl",
+        format_func=lambda k_: f"Step {k_} (event {int(res_all.loc[res_all.step == k_, 'event'].iloc[0])})")
+    tbase = st.radio(
+        "Time base", ["Absolute (aligned to heel-off)", "Normalised (APA onset → heel-off = 0–100 %)"],
+        0, horizontal=True,
+        help="Absolute: every step is aligned at heel-off and plotted in seconds; the mean is taken "
+             "at the same absolute time. Normalised: each step's APA (earliest of ML/AP onset → "
+             "heel-off) is stretched to 0–100 %, so APAs of different durations are averaged "
+             "phase by phase.")
+    norm = tbase.startswith("Normalised")
+    show_mean_xy = st.checkbox("Show mean trajectory", True)
+
+    def base_xy(rr):
         bw_ = bws[rr.step]
-        x = np.interp(txy + rr.HO_s, t, sig.ml.values) - sig.ml.values[bw_].mean()
-        y = np.interp(txy + rr.HO_s, t, sig.ap.values) - sig.ap.values[bw_].mean()
-        traj[rr.step] = (x, y)
+        return (sig.ml.values - sig.ml.values[bw_].mean(), sig.ap.values - sig.ap.values[bw_].mean())
+
+    curves = []   # (rr, axis_values, x, y, tooltip)
+    if norm:
+        pct = np.linspace(0, 100, 101)
+        skipped = []
+        for _, rr in res.iterrows():
+            ons = [rr[f"{nm}_onset_s"] for nm in ("ML", "AP") if not np.isnan(rr[f"{nm}_onset_s"])]
+            if not ons:
+                skipped.append(rr.step); continue
+            t_on = min(ons)
+            tq = t_on + pct / 100 * (rr.HO_s - t_on)
+            xs, ys = base_xy(rr)
+            curves.append((rr, pct, np.interp(tq, t, xs), np.interp(tq, t, ys),
+                           (tq - rr.HO_s) * 1000))
+        if skipped:
+            st.caption(f"Step(s) {', '.join(map(str, skipped))} have no APA onset and are not "
+                       "shown in the normalised plots.")
+        xlab, unit = "APA phase (% from onset to heel-off)", "%"
+    else:
+        a0, a1 = st.slider("Time window (s, relative to heel-off)", -2.0, 1.0, (-1.0, 0.0), 0.05)
+        txy = np.arange(a0, a1 + 1e-9, 1 / fs)
+        for _, rr in res.iterrows():
+            xs, ys = base_xy(rr)
+            curves.append((rr, txy, np.interp(txy + rr.HO_s, t, xs), np.interp(txy + rr.HO_s, t, ys),
+                           txy * 1000))
+        xlab, unit = "Time relative to heel-off (s)", "s"
+
+    # --- ML x AP path
+    fig = go.Figure()
+    for j, (rr, ax_, x, y, tip) in enumerate(curves):
+        cor = colors[j % len(colors)]
         fig.add_scatter(x=x, y=y, mode="lines", line=dict(color=cor, width=1.5),
-                        name=f"Step {rr.step}", legendgroup=f"s{rr.step}",
-                        customdata=txy * 1000,
-                        hovertemplate="t = %{customdata:.0f} ms<br>ML = %{x:.2f}<br>AP = %{y:.2f}")
-        # markers: APA onset (AP) and heel-off
-        for nm, sym in (("AP", "circle-open"), ("ML", "diamond-open")):
-            on = rr[f"{nm}_onset_rel_HO_ms"]
-            if not np.isnan(on) and a0 <= on / 1000 <= a1:
-                fig.add_scatter(x=[np.interp(on / 1000, txy, x)], y=[np.interp(on / 1000, txy, y)],
-                                mode="markers", marker=dict(color=cor, size=9, symbol=sym, line=dict(width=2)),
-                                legendgroup=f"s{rr.step}", showlegend=False, hoverinfo="skip")
-        if a0 <= 0 <= a1:
-            fig.add_scatter(x=[np.interp(0, txy, x)], y=[np.interp(0, txy, y)], mode="markers",
+                        name=f"Step {rr.step}", legendgroup=f"s{rr.step}", customdata=tip,
+                        hovertemplate="t = %{customdata:.0f} ms re. HO<br>ML = %{x:.2f}<br>AP = %{y:.2f}")
+        if norm:
+            fig.add_scatter(x=[x[0]], y=[y[0]], mode="markers", legendgroup=f"s{rr.step}",
+                            marker=dict(color=cor, size=9, symbol="circle-open", line=dict(width=2)),
+                            showlegend=False, hoverinfo="skip")
+        else:
+            for nm, sym in (("AP", "circle-open"), ("ML", "diamond-open")):
+                on = rr[f"{nm}_onset_rel_HO_ms"] / 1000
+                if not np.isnan(on) and ax_[0] <= on <= ax_[-1]:
+                    fig.add_scatter(x=[np.interp(on, ax_, x)], y=[np.interp(on, ax_, y)], mode="markers",
+                                    marker=dict(color=cor, size=9, symbol=sym, line=dict(width=2)),
+                                    legendgroup=f"s{rr.step}", showlegend=False, hoverinfo="skip")
+        x_end = 100 if norm else 0
+        if ax_[0] <= x_end <= ax_[-1]:
+            fig.add_scatter(x=[np.interp(x_end, ax_, x)], y=[np.interp(x_end, ax_, y)], mode="markers",
                             marker=dict(color=cor, size=9, symbol="square"),
                             legendgroup=f"s{rr.step}", showlegend=False, hoverinfo="skip")
-    if show_mean_xy and traj:
-        X = np.mean([v[0] for v in traj.values()], 0)
-        Y = np.mean([v[1] for v in traj.values()], 0)
+    if show_mean_xy and curves:
+        X = np.mean([c_[2] for c_ in curves], 0); Y = np.mean([c_[3] for c_ in curves], 0)
         fig.add_scatter(x=X, y=Y, mode="lines", line=dict(color="black", width=3.5),
-                        name=f"Mean (n={len(traj)})", customdata=txy * 1000,
-                        hovertemplate="t = %{customdata:.0f} ms<br>ML = %{x:.2f}<br>AP = %{y:.2f}")
+                        name=f"Mean (n={len(curves)})", customdata=curves[0][1],
+                        hovertemplate=("%{customdata:.0f} %" if norm else "t = %{customdata:.2f} s")
+                        + "<br>ML = %{x:.2f}<br>AP = %{y:.2f}")
     fig.add_hline(y=0, line=dict(color="grey", width=1))
     fig.add_vline(x=0, line=dict(color="grey", width=1))
     fig.update_xaxes(title_text="L5 ML (m/s², re. baseline)", zeroline=False)
@@ -650,46 +690,47 @@ def main():
                      scaleanchor="x", scaleratio=1)
     fig.update_layout(height=650, margin=dict(t=30, b=40), legend=dict(groupclick="togglegroup"))
     stretch(st.plotly_chart, fig)
-    st.caption("Each line is the L5 acceleration path in the horizontal plane within the chosen "
-               "window · ○ = AP onset · ◇ = ML onset · ■ = heel-off · black = mean trajectory. "
-               "Axes use the same scale.")
+    st.caption(("Each line is the L5 acceleration path in the horizontal plane from APA onset (○) to "
+                "heel-off (■); the mean is taken phase by phase (0–100 %). " if norm else
+                "Each line is the L5 acceleration path in the horizontal plane within the chosen window · "
+                "○ = AP onset · ◇ = ML onset · ■ = heel-off; the mean is taken at the same time. ")
+               + "Axes use the same scale. Time is not an axis here: the plot shows direction and size.")
 
-    # resultant over time
-    st.multiselect(
-        "Exclude steps (e.g. one that looks very different in the plots); removed from "
-        "sections 4–6, the means and the summary",
-        res_all.step.tolist(), key="excl",
-        format_func=lambda k_: f"Step {k_} (event {int(res_all.loc[res_all.step == k_, 'event'].iloc[0])})")
+    # --- horizontal resultant
     fig = go.Figure()
-    mean_on_all = min(v for v in mean_on.values() if not np.isnan(v)) if not all(np.isnan(v) for v in mean_on.values()) else np.nan
-    if not np.isnan(mean_on_all):
-        fig.add_vrect(x0=mean_on_all, x1=0, fillcolor="rgba(255,215,0,0.20)", line_width=0)
+    if not norm:
+        mean_on_all = np.nanmin([v for v in mean_on.values()]) if not all(np.isnan(v) for v in mean_on.values()) else np.nan
+        if not np.isnan(mean_on_all):
+            fig.add_vrect(x0=mean_on_all, x1=0, fillcolor="rgba(255,215,0,0.20)", line_width=0)
     M = []
-    for j, (_, rr) in enumerate(res.iterrows()):
+    for j, (rr, ax_, x, y, tip) in enumerate(curves):
         cor = colors[j % len(colors)]
-        bw_ = bws[rr.step]
-        x = np.interp(tt + rr.HO_s, t, sig.ml.values) - sig.ml.values[bw_].mean()
-        y = np.interp(tt + rr.HO_s, t, sig.ap.values) - sig.ap.values[bw_].mean()
         rres = np.hypot(x, y)
         M.append(rres)
-        fig.add_scatter(x=tt, y=rres, line=dict(color=cor, width=1.2), opacity=0.75,
+        fig.add_scatter(x=ax_, y=rres, line=dict(color=cor, width=1.2), opacity=0.75,
                         name=f"Step {rr.step}", legendgroup=f"s{rr.step}")
-        fig.add_scatter(x=[rr.RES_peak_rel_HO_ms / 1000], y=[rr.RES_peak_m_s2], mode="markers",
-                        marker=dict(color=cor, size=9, symbol="x"), legendgroup=f"s{rr.step}",
-                        showlegend=False, hoverinfo="skip")
-    M = np.array(M); mu, sd = M.mean(0), M.std(0)
-    fig.add_scatter(x=np.r_[tt, tt[::-1]], y=np.r_[mu + sd, (mu - sd)[::-1]], fill="toself",
-                    fillcolor="rgba(0,0,0,0.08)", line=dict(width=0), hoverinfo="skip",
-                    name="Mean ± SD", legendgroup="mean")
-    fig.add_scatter(x=tt, y=mu, line=dict(color="black", width=3), name=f"Mean (n={len(M)})",
-                    legendgroup="mean")
-    fig.add_vline(x=0, line=dict(color="red", dash="dash"))
+        if norm:
+            ip = int(np.argmax(rres)); px, py = ax_[ip], rres[ip]
+        else:
+            px, py = rr.RES_peak_rel_HO_ms / 1000, rr.RES_peak_m_s2
+        fig.add_scatter(x=[px], y=[py], mode="markers", marker=dict(color=cor, size=9, symbol="x"),
+                        legendgroup=f"s{rr.step}", showlegend=False, hoverinfo="skip")
+    if M:
+        M = np.array(M); mu, sd = M.mean(0), M.std(0); ax_ = curves[0][1]
+        fig.add_scatter(x=np.r_[ax_, ax_[::-1]], y=np.r_[mu + sd, (mu - sd)[::-1]], fill="toself",
+                        fillcolor="rgba(0,0,0,0.08)", line=dict(width=0), hoverinfo="skip",
+                        name="Mean ± SD", legendgroup="mean")
+        fig.add_scatter(x=ax_, y=mu, line=dict(color="black", width=3), name=f"Mean (n={len(M)})",
+                        legendgroup="mean")
+    if not norm:
+        fig.add_vline(x=0, line=dict(color="red", dash="dash"))
     fig.update_layout(title="Horizontal resultant √(ML² + AP²)", height=450,
                       margin=dict(t=50, b=40), legend=dict(groupclick="togglegroup"),
-                      xaxis_title="Time relative to heel-off (s)", yaxis_title="m/s² (re. baseline)")
+                      xaxis_title=xlab, yaxis_title="m/s² (re. baseline)")
     stretch(st.plotly_chart, fig)
-    st.caption("Yellow = APA (earliest mean onset → heel-off) · × = peak resultant before heel-off "
-               "for each step · red dashed = heel-off.")
+    st.caption("Size of the L5 horizontal acceleration regardless of direction · × = peak of each step"
+               + (" (0 % = APA onset, 100 % = heel-off)." if norm else
+                  " before heel-off · yellow = APA (earliest mean onset → heel-off) · red dashed = heel-off."))
 
     # ---------------- 6. Results ----------------
     st.subheader("6. Results")
@@ -732,7 +773,10 @@ def main():
             "crossing that stays outside the band for the minimum time.\n"
             "- **Horizontal resultant:** √(ML² + AP²) of the baseline-corrected signals; peak "
             "between the end of the baseline and heel-off. Angle at the peak: 0° = forward, "
-            "+90° = +ML direction.\n"
+            "+90° = +ML direction. It is the size of the horizontal acceleration vector, always ≥ 0; "
+            "baseline noise gives it a small positive floor.\n"
+            "- **Section 5 time base:** absolute = aligned at heel-off, mean at the same time; "
+            "normalised = each step's APA (earliest ML/AP onset → heel-off) resampled to 0–100 %.\n"
             "- **dv:** integral of acceleration from APA onset to heel-off (velocity change).\n"
             "- **Caution:** the L5 AP signal includes the gravity projection when the trunk tilts "
             "(≈0.17 m/s² per degree) as well as linear acceleration.")
