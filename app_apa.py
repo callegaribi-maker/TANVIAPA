@@ -331,6 +331,11 @@ def main():
                                help="Phone on L5 with the screen facing out: z points backwards, "
                                     "so −1 makes + forward.")
         leg_axis = c1.selectbox("Leg vertical axis", ["x", "y", "z"], 1)
+        stance_side = st.radio("Stance foot is on the ML …", ["+ side", "− side"], 0, horizontal=True,
+                               help="During the APA the trunk is pushed toward the stance leg. "
+                                    "With the current set-up (leg sensor on the stepping leg) the "
+                                    "trunk moves to +ML, so the stance foot is on the + side.")
+        st_sign = 1 if stance_side.startswith("+") else -1
 
     with sb.expander("Filters and synchronisation"):
         fs = st.number_input("Resampling rate (Hz)", 50, 500, 100, 10)
@@ -431,7 +436,7 @@ def main():
     res = pd.DataFrame(rows)
 
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
-                        subplot_titles=("Leg vertical", "L5 ML", "L5 AP (+ forward)"))
+                        subplot_titles=("Leg vertical", f"L5 ML (+ = {'stance' if st_sign > 0 else 'swing'} side)", "L5 AP (+ forward)"))
     fig.add_scatter(x=t, y=sig.gy, line=dict(color="black", width=1), name="Leg vertical", row=1, col=1)
     fig.add_scatter(x=t, y=sig.ml, line=dict(color="#1f77b4", width=1), name="ML", row=2, col=1)
     fig.add_scatter(x=t, y=sig.ap, line=dict(color="#ff7f0e", width=1), name="AP", row=3, col=1)
@@ -468,7 +473,7 @@ def main():
     bw = bws[k]
     tt = t[w] - r.HO_s
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-                        subplot_titles=("Leg vertical (re. baseline)", "L5 ML (re. baseline)",
+                        subplot_titles=("Leg vertical (re. baseline)", f"L5 ML (+ = {'stance' if st_sign > 0 else 'swing'} side, re. baseline)",
                                         "L5 AP (re. baseline, + forward)"))
     for i, (col, cor) in enumerate((("gy", "black"), ("ml", "#1f77b4"), ("ap", "#ff7f0e")), 1):
         s = sig[col].values
@@ -510,7 +515,7 @@ def main():
     tt = np.arange(pre, pos, 1 / fs)
     colors = pc.qualitative.Plotly + pc.qualitative.D3
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-                        subplot_titles=("Leg vertical (re. baseline)", "L5 ML (re. baseline)",
+                        subplot_titles=("Leg vertical (re. baseline)", f"L5 ML (+ = {'stance' if st_sign > 0 else 'swing'} side, re. baseline)",
                                         "L5 AP (re. baseline, + forward)"))
     mean_on = {nm: np.nanmean(res[f"{nm}_onset_rel_HO_ms"]) / 1000 for nm in ("ML", "AP")}
     sd_on = {nm: np.nanstd(res[f"{nm}_onset_rel_HO_ms"]) / 1000 for nm in ("ML", "AP")}
@@ -619,16 +624,44 @@ def main():
                         marker=dict(color="black", size=10, symbol="circle-open", line=dict(width=2)))
         fig.add_scatter(x=[mx[-1]], y=[my[-1]], mode="markers", name="Heel-off (100 %)",
                         marker=dict(color="black", size=10, symbol="square"))
+    # --- two feet (top view): stance and swing side
+    if curves:
+        allx = np.concatenate([c_[1] for c_ in curves]); ally = np.concatenate([c_[2] for c_ in curves])
+        y0 = min(ally.min(), 0.0); Lf = max(ally.max() - y0, 1e-3)      # foot length = data height
+        Wf = 0.36 * Lf
+        reach = max(np.abs(allx).max(), 0.05) + 0.7 * Wf
+        u = np.linspace(0, 1, 50)                                        # heel (0) -> toe (1)
+        widen = np.where(u < 0.72, 0.62 + 0.38 * u / 0.72, 1.0)          # narrow heel, wide forefoot
+        hw = Wf / 2 * np.sin(np.pi * u) ** 0.35 * widen
+        arch = 1 - 0.4 * np.exp(-((u - 0.42) / 0.14) ** 2)               # medial arch
+        prof_y = np.r_[u, u[::-1]] * Lf + y0
+        for side, lab, dash, fc in ((st_sign, "Stance", "solid", "rgba(90,90,90,0.18)"),
+                                    (-st_sign, "Swing", "dash", "rgba(90,90,90,0.06)")):
+            cx = side * reach
+            fx = np.r_[cx + side * hw, (cx - side * hw * arch)[::-1]]
+            fig.add_scatter(x=fx, y=prof_y, fill="toself", fillcolor=fc, mode="lines",
+                            line=dict(color="rgba(70,70,70,0.6)", width=1.5, dash=dash),
+                            hoverinfo="skip", showlegend=False)
+            fig.add_annotation(x=cx, y=y0, yshift=-14, text=f"<b>{lab}</b>", showarrow=False,
+                               font=dict(size=12, color="#444"))
+            if lab == "Swing":
+                d_ = 1 if sel_type == FWD else -1
+                ya = y0 + Lf if d_ > 0 else y0
+                fig.add_annotation(x=cx, y=ya + d_ * 0.25 * Lf, ax=cx, ay=ya + d_ * 0.02 * Lf,
+                                   xref="x", yref="y", axref="x", ayref="y", showarrow=True,
+                                   arrowhead=2, arrowwidth=2, arrowcolor="#444", text="")
+        fig.data = fig.data[-2:] + fig.data[:-2]                         # feet behind the paths
     fig.add_hline(y=0, line=dict(color="grey", width=1))
     fig.add_vline(x=0, line=dict(color="grey", width=1))
-    fig.update_xaxes(title_text=f"L5 ML ({unit_lbl})", zeroline=False)
+    fig.update_xaxes(title_text=f"L5 ML ({unit_lbl}, + = {'stance' if st_sign > 0 else 'swing'} side)",
+                     zeroline=False)
     fig.update_yaxes(title_text=f"L5 AP ({unit_lbl}, + forward)", zeroline=False,
                      scaleanchor="x", scaleratio=1)
     fig.update_layout(title="ML × AP path (onset → heel-off)", height=560,
                       margin=dict(t=50, b=40), legend=dict(groupclick="togglegroup"))
     stretch(st.plotly_chart, fig)
-    st.caption("L5 acceleration path in the horizontal plane (smoothed at 3 Hz for display; equal axis "
-               "scales) · thin lines = steps · black = mean path · blue ellipses = ± SD of ML and AP at "
+    st.caption("L5 acceleration path in the horizontal plane, top view (smoothed at 3 Hz for display; "
+               "equal axis scales) · feet: stance (solid) and swing (dashed, arrow = step direction) · thin lines = steps · black = mean path · blue ellipses = ± SD of ML and AP at "
                "25, 50, 75 and 100 % of the APA. Click a step in the legend to hide it.")
 
     # --- horizontal resultant: same absolute window as section 4, in m/s² (no normalisation)
