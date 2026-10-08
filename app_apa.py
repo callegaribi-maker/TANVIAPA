@@ -595,7 +595,7 @@ def main():
     if res.empty:
         st.warning("All steps are excluded.")
         st.stop()
-    tt = np.arange(pre, pos, 1 / fs)
+    tt = np.arange(-1.0, 1.0 + 1e-9, 1 / fs)          # fixed window −1 to +1 s around heel-off
     colors = pc.qualitative.Plotly + pc.qualitative.D3
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
                         subplot_titles=("Leg vertical (re. baseline)", f"L5 ML (+ = {'stance' if st_sign > 0 else 'swing'} side, re. baseline)",
@@ -644,8 +644,13 @@ def main():
     fig.add_vline(x=0, line=dict(color="red", dash="dash"))
     fig.update_yaxes(title_text="m/s²")
     fig.update_xaxes(title_text="Time relative to heel-off (s)", row=3, col=1)
-    fig.update_layout(height=900, margin=dict(t=40, b=40), legend=dict(groupclick="togglegroup"))
-    stretch(st.plotly_chart, fig)
+    fig.update_xaxes(range=[-1, 1], dtick=0.25)
+    fig.update_layout(width=800, height=800, margin=dict(t=40, b=40, l=60, r=20),
+                      legend=dict(groupclick="togglegroup"))
+    try:
+        st.plotly_chart(fig, width="content")
+    except TypeError:
+        st.plotly_chart(fig, use_container_width=False)
     st.caption("Yellow = APA (mean onset → heel-off) · thin lines = individual steps · "
                "○ = step onset · × = step peak · black = mean ± SD · red dashed = heel-off. "
                "Click a step in the legend to hide or show it.")
