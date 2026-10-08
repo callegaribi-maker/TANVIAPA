@@ -200,8 +200,9 @@ def heel_off_candidates(sig, bs, p):
         if ob[i:i + n].all():
             out["depart"] = t[seg[i]]; break
 
-    # 2) start of the rise to the first leg vertical peak above baseline + ho_thr
-    out["rise"] = np.nan
+    # 2) main rise: first leg vertical peak above baseline + ho_thr; walk back to the valley before
+    #    it, then (default) forward to where the signal crosses the resting level upward
+    out["rise"] = out["rise_valley"] = np.nan
     seg = np.flatnonzero((t > bs - 1.0) & (t < bs + 1.5))
     above = gy[seg] - g0 > p["ho_thr"]
     if above.any():
@@ -211,7 +212,12 @@ def heel_off_candidates(sig, bs, p):
         j = pk
         while j > 0 and gy[j - 1] < gy[j]:
             j -= 1
-        out["rise"] = t[j]
+        out["rise_valley"] = t[j]
+        k = j
+        if gy[j] < g0:                       # valley below rest: first upward crossing of rest
+            while k < pk and gy[k] < g0:
+                k += 1
+        out["rise"] = t[k] if p.get("ho_point", "cross") == "cross" else t[j]
 
     # 3) shank tilt (3-axis gravity direction) leaves its baseline
     ang = shank_tilt(sig, bw)
@@ -401,9 +407,15 @@ def main():
                               disabled=class_mode == "Alternating")
 
     with sb.expander("Heel-off and APA thresholds"):
+        ho_point = st.radio(
+            "Heel-off point on the main rise", ["Resting-level crossing after the valley", "Valley"], 0,
+            help="Resting-level crossing (default): the moment the leg vertical acceleration, after "
+                 "the dip, crosses its resting level upward, i.e. the leg starts to accelerate "
+                 "upward. Valley: the lowest point just before the rise (earlier, ~30–70 ms).")
+        ho_point = "cross" if ho_point.startswith("Resting") else "valley"
         ho_thr = st.slider("Heel-off: minimum leg peak above baseline (m/s²)", 0.3, 3.0, 0.8, 0.1,
-                           help="Heel-off = start of the main rise of the leg vertical signal "
-                                "up to its first peak above this value.")
+                           help="Only selects WHICH rise is used: the first one whose peak exceeds "
+                                "the resting level by this value.")
         min_abs = st.slider("APA minimum band width (m/s²)", 0.0, 0.5, 0.1 if grav_L5 else 0.04, 0.01,
                             key=f"min_abs_{grav_L5}",
                             help="Default 0.10 m/s² for data with gravity, 0.04 m/s² for linear "
@@ -421,7 +433,7 @@ def main():
              sync_thr=sync_thr, lag=lag_val if lag_manual else None,
              burst_thr=burst_thr, burst_merge=burst_merge, burst_min_dur=burst_min_dur,
              post_jump=post_jump, class_thr=class_thr, ho_thr=ho_thr,
-             ho_method=ho_method, ho_k=ho_k, ho_min_v=ho_min_v, ho_min_deg=ho_min_deg,
+             ho_method=ho_method, ho_point=ho_point, ho_k=ho_k, ho_min_v=ho_min_v, ho_min_deg=ho_min_deg,
              ho_dur=ho_dur, ap_dir=1 if sel_type == FWD else -1,
              class_mode="alternating" if class_mode == "Alternating" else "auto",
              base_len=base_len, k_sd=k_sd, min_abs=min_abs, min_dur=min_dur,
@@ -878,9 +890,11 @@ def main():
             "one is forward and they alternate (or, in automatic mode, from the sign of the largest "
             "L5 AP excursion).\n"
             "- **Heel-off (leg sensor only):** leg baseline = quietest 0.5 s between 2.5 and 0.3 s "
-            "before the step burst; heel-off = start of the rise of the leg vertical signal to its first "
-            "peak above baseline + threshold. Chosen because it does not change with the threshold "
-            "(most repeatable of the leg-only criteria tested).\n"
+            "before the step burst. The first leg vertical peak exceeding the resting level by the "
+            "threshold (0.8 m/s²) identifies the main rise; heel-off = the moment, after the dip that "
+            "precedes this rise, when the signal crosses the resting level upward (the leg starts to "
+            "accelerate upward). If the dip does not go below rest, the valley is used. The threshold "
+            "only selects which rise is used, so heel-off does not depend on it.\n"
             "- **Forward / backward:** the same pipeline is applied to the chosen step type; for "
             "backward steps the AP APA is searched in the backward (−) direction.\n"
             "- **Baseline:** quietest window before heel-off (between HO − 2.6 s and HO − 0.6 s).\n"
