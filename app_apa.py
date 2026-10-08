@@ -821,11 +821,40 @@ def main():
                            res_all[["included", "step", "event"] + list(APA_VARS)].assign(
                                subject=subj, step_type=sel_type).to_csv(index=False),
                            f"APA_{subj}_{sel_type}_steps.csv", "text/csv")
-        with st.expander("Variable definitions"):
-            st.markdown("\n".join(f"- **{k}** — {v}" for k, v in APA_VARS.items())
-                        + "\n- Times are negative when they occur before heel-off (HO). "
-                          "Means and SDs use only the included steps; steps without a detected "
-                          "onset are left out of the onset/duration means (see n_steps_with_APA_onset).")
+        st.info(
+            "**How to read the APA variables** (HO = heel-off; times are in ms relative to HO, "
+            "negative = before HO)\n\n"
+            "**Timing**\n"
+            "- **APA onset** — when the anticipatory adjustment starts (earliest of ML and AP). "
+            "*More negative* = starts earlier, longer preparation before the foot leaves the ground. "
+            "*Closer to 0* = late, short preparation.\n"
+            "- **APA duration** — time from onset to HO (same information as onset, positive). "
+            "*Longer* = slower or more cautious preparation (common with age, fear of falling, "
+            "neurological conditions); *shorter* = quicker preparation.\n"
+            "- **ML onset / AP onset** — start of the lateral and forward components separately. "
+            "Comparing them shows the sequence: usually one starts before the other.\n"
+            "- **Time to peak (ML, AP, resultant)** — when the largest acceleration happens. "
+            "*Close to 0* = peak right at heel-off; *more negative* = peak earlier in the APA.\n\n"
+            "**Size (how strong the APA is)**\n"
+            "- **ML peak amplitude** — largest trunk (L5) acceleration toward the stance leg. "
+            "*Larger* = stronger weight shift to the stance side; *smaller* = weaker lateral "
+            "preparation, the body is less unloaded from the stepping leg.\n"
+            "- **AP peak amplitude** — largest forward trunk acceleration. *Larger* = stronger "
+            "forward propulsion before the step; *smaller* = weaker forward preparation.\n"
+            "- **Resultant peak** — size of the horizontal acceleration regardless of direction "
+            "(ML and AP together). *Larger* = stronger overall APA.\n"
+            "- **ML Δv / AP Δv** — velocity gained by the trunk from onset to HO (area under the "
+            "acceleration curve). Combines size *and* duration: *larger* = more momentum carried "
+            "into the step.\n\n"
+            "**Direction**\n"
+            "- **Resultant direction** — direction of the acceleration at its peak: 0° = straight "
+            "forward, 90° = straight toward the stance side. *Larger angle* = more lateral APA; "
+            "*smaller angle* = more forward APA. A large SD across steps = inconsistent direction.\n\n"
+            "**Notes** — Means and SDs use only the included steps; steps without a detected onset "
+            "are left out of the onset/duration means (see `n_steps_with_APA_onset`). The SD across "
+            "steps is itself a measure of consistency: *larger SD* = more variable APAs. Amplitudes "
+            "from recordings with and without gravity are not comparable (see `L5_gravity`)."
+        )
     else:
         show = ["step", "event", "L5_gravity", "HO_s", "HO_source",
                 "ML_direction", "ML_onset_rel_HO_ms", "ML_peak_m_s2", "ML_peak_rel_HO_ms", "ML_dv_m_s",
