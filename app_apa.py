@@ -17,13 +17,24 @@ FWD, BWD, IGN, UND = "forward", "backward", "ignore", "undefined"
 # =============================================================================
 
 def read_acc(file_or_buf):
-    """Reads a 'time(ms), X, Y, Z' file (any header)."""
-    d = pd.read_csv(file_or_buf, skipinitialspace=True)
+    """Reads a 'time, X, Y, Z' file. Accepts comma, semicolon or tab separators, decimal
+    comma, any header names; time in ms (or s, detected automatically)."""
+    raw = file_or_buf.read() if hasattr(file_or_buf, "read") else open(file_or_buf, "rb").read()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    first = raw.splitlines()[1] if len(raw.splitlines()) > 1 else raw
+    sep = ";" if first.count(";") >= 3 else ("\t" if first.count("\t") >= 3 else ",")
+    if sep != "," and "," in first and "." not in first:      # decimal comma
+        raw = raw.replace(",", ".")
+    d = pd.read_csv(io.StringIO(raw), sep=sep, skipinitialspace=True, engine="python")
+    if d.shape[1] < 4:
+        raise ValueError(f"Expected 4 columns (time, X, Y, Z); found {d.shape[1]}.")
     d = d.iloc[:, :4]
     d.columns = ["t", "x", "y", "z"]
     d = d.apply(pd.to_numeric, errors="coerce").dropna()
     d = d.sort_values("t").drop_duplicates("t")
-    d["t"] = d["t"] / 1000.0  # ms -> s
+    dt = np.median(np.diff(d["t"].values))
+    d["t"] = d["t"] / (1.0 if dt < 0.5 else 1000.0)          # seconds if dt < 0.5, else ms
     return d.reset_index(drop=True)
 
 
@@ -38,31 +49,43 @@ def sampling_info(d):
                 fs_med=1000 / np.median(dt), dt_max_ms=dt.max())
 
 
-def find_jump_and_lag(L, G, fs, sync_thr, max_lag=0.5):
-    """Sync event = FIRST time the leg acceleration norm departs from its initial resting value
-    by more than `sync_thr` m/s². Lag from cross-correlation of the acceleration norms of both
-    sensors in a window around that event (lag > 0: leg lags L5)."""
-    t = np.arange(0, min(L.t.iloc[-1], G.t.iloc[-1]), 1 / fs)
-    mL = np.sqrt(sum(np.interp(t, L.t, L[a]) ** 2 for a in "xyz"))
-    mG = np.sqrt(sum(np.interp(t, G.t, G[a]) ** 2 for a in "xyz"))
-    rest = np.median(mG[: int(fs)])
-    dev = np.abs(lowpass(mG, 20, fs) - rest) > sync_thr
+def first_disturbance(D, fs, thr):
+    """First time the acceleration norm of a sensor departs from its initial resting value by
+    more than `thr` m/s², and the end of that burst (first 0.4 s of quiet after it)."""
+    t = np.arange(0, D.t.iloc[-1], 1 / fs)
+    m = np.sqrt(sum(np.interp(t, D.t, D[a]) ** 2 for a in "xyz"))
+    rest = np.median(m[: int(fs)])
+    dev = np.abs(lowpass(m, 20, fs) - rest) > thr
     if not dev.any():
-        return np.nan, 0.0, np.nan
+        return np.nan, np.nan
     i0 = int(np.argmax(dev))
-    t0 = t[i0]
-    # end of the sync burst: first 0.4 s of quiet after it
-    quiet = np.abs(lowpass(mG, 5, fs) - rest) < 0.5
-    j = i0
-    while j < len(t) - int(0.4 * fs) and not quiet[j:j + int(0.4 * fs)].all():
+    quiet = np.abs(lowpass(m, 5, fs) - rest) < 0.5
+    j, n = i0, int(0.4 * fs)
+    while j < len(t) - n and not quiet[j:j + n].all():
         j += 1
-    t_end = t[j]
-    w = (t > t0 - 0.5) & (t < t_end + 0.3)
+    return t[i0], t[j]
+
+
+def find_jump_and_lag(L, G, fs, sync_thr, max_lag=0.5):
+    """Sync event = FIRST disturbance (jump) of each sensor. Coarse lag = difference between the
+    two first disturbances (any size); refined by cross-correlation of the acceleration norms
+    within ±max_lag. Lag > 0: leg recording lags L5. Returns times on the leg clock."""
+    tG0, tG1 = first_disturbance(G, fs, sync_thr)
+    tL0, _ = first_disturbance(L, fs, sync_thr)
+    if np.isnan(tG0):
+        return np.nan, 0.0, np.nan
+    coarse = 0.0 if np.isnan(tL0) else tG0 - tL0
+    if abs(coarse) <= max_lag:          # recordings started together: refine directly
+        coarse = 0.0
+    t = np.arange(0, G.t.iloc[-1], 1 / fs)                       # leg clock
+    mG = np.sqrt(sum(np.interp(t, G.t, G[a]) ** 2 for a in "xyz"))
+    mL = np.sqrt(sum(np.interp(t, L.t + coarse, L[a]) ** 2 for a in "xyz"))
+    w = (t > tG0 - 0.5) & (t < tG1 + 0.3)
     a_, b_ = mL[w] - mL[w].mean(), mG[w] - mG[w].mean()
     c = np.correlate(b_, a_, "full")
     lags = np.arange(-len(a_) + 1, len(a_)) / fs
     k = np.abs(lags) <= max_lag
-    return t0, lags[k][np.argmax(c[k])], t_end
+    return tG0, coarse + lags[k][np.argmax(c[k])], tG1
 
 
 def build_signals(L, G, p):
