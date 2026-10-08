@@ -19,7 +19,12 @@ FWD, BWD, IGN, UND = "forward", "backward", "ignore", "undefined"
 def read_acc(file_or_buf):
     """Reads a 'time, X, Y, Z' file. Accepts comma, semicolon or tab separators, decimal
     comma, any header names; time in ms (or s, detected automatically)."""
-    raw = file_or_buf.read() if hasattr(file_or_buf, "read") else open(file_or_buf, "rb").read()
+    if hasattr(file_or_buf, "read"):
+        if hasattr(file_or_buf, "seek"):
+            file_or_buf.seek(0)
+        raw = file_or_buf.read()
+    else:
+        raw = open(file_or_buf, "rb").read()
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="ignore")
     first = raw.splitlines()[1] if len(raw.splitlines()) > 1 else raw
@@ -41,6 +46,12 @@ def read_acc(file_or_buf):
 def lowpass(s, fc, fs, order=4):
     b, a = butter(order, fc / (fs / 2))
     return filtfilt(b, a, s)
+
+
+def has_gravity(d):
+    """True if the recording contains gravity (|a| ≈ 9.8 m/s² at rest); False if the device
+    exported linear acceleration (gravity removed, |a| ≈ 0)."""
+    return float(np.median(np.sqrt(d.x ** 2 + d.y ** 2 + d.z ** 2))) > 4.0
 
 
 def sampling_info(d):
@@ -325,6 +336,15 @@ def main():
     sb.header("Files")
     fL5 = sb.file_uploader("L5 accelerometer", type=["txt", "csv"])
     fLeg = sb.file_uploader("Leg accelerometer", type=["txt", "csv"])
+    L = G = None
+    if fL5 and fLeg:
+        try:
+            L, G = read_acc(fL5), read_acc(fLeg)
+        except Exception as e:
+            st.error(f"Could not read the files: {e}. Expected 4 columns: time, X, Y, Z "
+                     "(separated by comma, semicolon or tab).")
+            st.stop()
+    grav_L5 = has_gravity(L) if L is not None else True
 
     sb.header("Analysis")
     sel_type = sb.radio("Steps to analyse", [FWD, BWD], 0, horizontal=True,
@@ -384,7 +404,10 @@ def main():
         ho_thr = st.slider("Heel-off: minimum leg peak above baseline (m/s²)", 0.3, 3.0, 0.8, 0.1,
                            help="Heel-off = start of the main rise of the leg vertical signal "
                                 "up to its first peak above this value.")
-        min_abs = st.slider("APA minimum band width (m/s²)", 0.0, 0.5, 0.1, 0.02)
+        min_abs = st.slider("APA minimum band width (m/s²)", 0.0, 0.5, 0.1 if grav_L5 else 0.04, 0.01,
+                            key=f"min_abs_{grav_L5}",
+                            help="Default 0.10 m/s² for data with gravity, 0.04 m/s² for linear "
+                                 "acceleration (gravity removed), whose APAs are much smaller.")
         base_len = st.slider("L5 baseline window (s)", 0.2, 1.0, 0.5, 0.05)
     ho_k, ho_min_v, ho_min_deg, ho_dur = 5.0, 0.15, 2.0, 0.05
     peak_frac, min_dur = 0.15, 0.1
@@ -393,7 +416,6 @@ def main():
         st.info("Upload both files (L5 and leg) in the sidebar to start.")
         st.stop()
 
-    L, G = read_acc(fL5), read_acc(fLeg)
     p = dict(fs=fs, fc_l5=fc_l5, fc_leg=fc_leg, ml_axis=ml_axis, ml_sign=ml_sign,
              ap_axis=ap_axis, ap_sign=ap_sign, leg_axis=leg_axis,
              sync_thr=sync_thr, lag=lag_val if lag_manual else None,
@@ -416,6 +438,16 @@ def main():
     c[2].metric("Sync event (leg)", f"{R['t_jump']:.2f}–{R['t_jump_end']:.2f} s")
     c[3].metric("Lag used (leg behind L5)", f"{p['lag']:.3f} s",
                 f"auto = {R['lag_auto']:.3f} s", delta_color="off")
+
+    gL, gG = has_gravity(L), has_gravity(G)
+    kind = lambda g: "with gravity" if g else "linear acceleration (gravity removed)"
+    st.caption(f"Data type — L5: **{kind(gL)}** · leg: **{kind(gG)}**.")
+    if not gL:
+        st.info("The L5 recording has no gravity component (linear acceleration). The APA here is "
+                "the true trunk acceleration only — it does not include the trunk-tilt component "
+                "present in recordings with gravity, so amplitudes are much smaller (typically "
+                "0.1–0.3 m/s²) and **not comparable** with recordings that include gravity. Keep the "
+                "two data types in separate analyses (the CSV has a column `L5_gravity`).")
 
     with st.expander("Check the alignment at the sync event", expanded=True):
         w = (t > R["t_jump"] - p["lag"] - 1.0) & (t < R["t_jump_end"] - p["lag"] + 1.0)
@@ -453,10 +485,26 @@ def main():
     rows, bws = [], {}
     for k, r in fwd.iterrows():
         m, bw = apa_metrics(sig, r.HO_s, p)
-        rows.append(dict(step=k + 1, event=r.event, HO_s=r.HO_s,
+        rows.append(dict(step=k + 1, event=r.event, L5_gravity=gL, HO_s=r.HO_s,
                          HO_source="manual" if not np.isnan(r.HO_manual_s) else "auto", **m))
         bws[k + 1] = bw
     res = pd.DataFrame(rows)
+
+    # --- sanity check: does L5 AP separate forward from backward steps?
+    ap_pre = {FWD: [], BWD: []}
+    for _, r in ev[ev.type.isin([FWD, BWD]) & ev.HO_s.notna()].iterrows():
+        bw_ = quiet_baseline(sig, r.HO_s, fs, base_len)
+        w_ = (t > r.HO_s - 0.4) & (t <= r.HO_s)
+        ap_pre[r.type].append(sig.ap.values[w_].mean() - sig.ap.values[bw_].mean())
+    if len(ap_pre[FWD]) >= 2 and len(ap_pre[BWD]) >= 2:
+        f_ok = np.mean(np.array(ap_pre[FWD]) > 0); b_ok = np.mean(np.array(ap_pre[BWD]) < 0)
+        if (f_ok + b_ok) / 2 < 0.65:
+            st.warning(
+                f"L5 AP does not clearly separate forward from backward steps here "
+                f"(AP forward before heel-off in {f_ok:.0%} of 'forward' steps and backward in "
+                f"{b_ok:.0%} of 'backward' steps). Check the step labelling in the event table "
+                "(e.g. an extra event breaking the alternation) and the AP axis/sign in "
+                "Advanced settings → Sensor axes before using these results.")
 
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04,
                         subplot_titles=("Leg vertical", f"L5 ML (+ = {'stance' if st_sign > 0 else 'swing'} side)", "L5 AP (+ forward)"))
@@ -721,20 +769,77 @@ def main():
 
     # ---------------- 6. Results ----------------
     st.subheader("6. Results")
-    show = ["step", "event", "HO_s", "HO_source",
-            "ML_direction", "ML_onset_rel_HO_ms", "ML_peak_m_s2", "ML_peak_rel_HO_ms", "ML_dv_m_s",
-            "AP_onset_rel_HO_ms", "AP_peak_m_s2", "AP_peak_rel_HO_ms", "AP_dv_m_s",
-            "RES_peak_m_s2", "RES_peak_rel_HO_ms", "RES_angle_deg"]
-    show = ["included"] + [c for c in show if c in res_all.columns]
-    stretch(st.dataframe, res_all[show], hide_index=True)
-    num = [c for c in show if c not in ("included", "step", "event", "HO_s", "HO_source", "ML_direction")]
-    summ = res[num].agg(["mean", "std", "median", "min", "max"]).round(2).T
-    st.markdown(f"**Summary ({sel_type} steps included: n = {len(res)})**")
-    stretch(st.dataframe, summ)
+    view = st.radio("Results view", ["APA variables (for tabulation)", "Full (all columns)"], 0,
+                    horizontal=True)
 
-    buf = io.StringIO()
-    res_all.to_csv(buf, index=False)
-    st.download_button("Download results (CSV)", buf.getvalue(), f"apa_results_{sel_type}.csv", "text/csv")
+    # --- APA variables, one row per step
+    APA_VARS = {   # column in res -> label for tabulation
+        "APA_onset_ms": "APA onset (ms before HO, earliest of ML/AP)",
+        "APA_duration_ms": "APA duration (ms, onset → HO)",
+        "ML_onset_rel_HO_ms": "ML onset (ms re. HO)",
+        "ML_peak_m_s2": "ML peak amplitude (m/s²)",
+        "ML_peak_rel_HO_ms": "ML time to peak (ms re. HO)",
+        "ML_dv_m_s": "ML Δv (m/s)",
+        "AP_onset_rel_HO_ms": "AP onset (ms re. HO)",
+        "AP_peak_m_s2": "AP peak amplitude (m/s²)",
+        "AP_peak_rel_HO_ms": "AP time to peak (ms re. HO)",
+        "AP_dv_m_s": "AP Δv (m/s)",
+        "RES_peak_m_s2": "Resultant peak (m/s²)",
+        "RES_peak_rel_HO_ms": "Resultant time to peak (ms re. HO)",
+        "RES_angle_deg": "Resultant direction at peak (°, 0 = forward, + = stance side)",
+    }
+    for d_ in (res_all, res):
+        on_ = d_[["ML_onset_rel_HO_ms", "AP_onset_rel_HO_ms"]].min(axis=1)
+        d_["APA_onset_ms"] = on_
+        d_["APA_duration_ms"] = -on_
+        if st_sign < 0:   # angle sign follows the stance side
+            d_["RES_angle_deg"] = -d_["RES_angle_deg"]
+
+    subj_default = str(getattr(fL5, "name", "subject")).replace("\\", "/").split("/")[-1].rsplit(".", 1)[0]
+    subj = st.text_input("Subject ID (first column of the tabulation row)", subj_default)
+
+    if view.startswith("APA"):
+        per_step = res_all[["included", "step", "event"] + list(APA_VARS)].rename(columns=APA_VARS)
+        st.markdown("**Per step**")
+        stretch(st.dataframe, per_step.round(3), hide_index=True)
+
+        # one row per subject: n, then mean and SD of each APA variable (included steps only)
+        row = {"subject": subj, "step_type": sel_type, "L5_gravity": gL,
+               "n_steps": len(res), "n_steps_with_APA_onset": int(res["APA_onset_ms"].notna().sum()),
+               "excluded_steps": ", ".join(map(str, excl)) or "-",
+               "k_SD": k_sd}
+        for c_ in APA_VARS:
+            row[f"{c_}_mean"] = round(res[c_].mean(), 3)
+            row[f"{c_}_sd"] = round(res[c_].std(), 3)
+        row_df = pd.DataFrame([row])
+        st.markdown("**Subject summary — one row, ready to paste into the group spreadsheet**")
+        stretch(st.dataframe, row_df, hide_index=True)
+        c1, c2 = st.columns(2)
+        c1.download_button("Download subject row (CSV)", row_df.to_csv(index=False),
+                           f"APA_{subj}_{sel_type}_summary.csv", "text/csv")
+        c2.download_button("Download per-step APA variables (CSV)",
+                           res_all[["included", "step", "event"] + list(APA_VARS)].assign(
+                               subject=subj, step_type=sel_type).to_csv(index=False),
+                           f"APA_{subj}_{sel_type}_steps.csv", "text/csv")
+        with st.expander("Variable definitions"):
+            st.markdown("\n".join(f"- **{k}** — {v}" for k, v in APA_VARS.items())
+                        + "\n- Times are negative when they occur before heel-off (HO). "
+                          "Means and SDs use only the included steps; steps without a detected "
+                          "onset are left out of the onset/duration means (see n_steps_with_APA_onset).")
+    else:
+        show = ["step", "event", "L5_gravity", "HO_s", "HO_source",
+                "ML_direction", "ML_onset_rel_HO_ms", "ML_peak_m_s2", "ML_peak_rel_HO_ms", "ML_dv_m_s",
+                "AP_onset_rel_HO_ms", "AP_peak_m_s2", "AP_peak_rel_HO_ms", "AP_dv_m_s",
+                "RES_peak_m_s2", "RES_peak_rel_HO_ms", "RES_angle_deg"]
+        show = ["included"] + [c for c in show if c in res_all.columns]
+        stretch(st.dataframe, res_all[show], hide_index=True)
+        num = [c for c in show if c not in ("included", "step", "event", "L5_gravity", "HO_s", "HO_source", "ML_direction")]
+        summ = res[num].agg(["mean", "std", "median", "min", "max"]).round(2).T
+        st.markdown(f"**Summary ({sel_type} steps included: n = {len(res)})**")
+        stretch(st.dataframe, summ)
+        buf = io.StringIO()
+        res_all.to_csv(buf, index=False)
+        st.download_button("Download results (CSV)", buf.getvalue(), f"apa_results_{sel_type}.csv", "text/csv")
 
     with st.expander("Method notes"):
         st.markdown(
