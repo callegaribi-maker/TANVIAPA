@@ -707,42 +707,50 @@ def main():
                         marker=dict(color="black", size=10, symbol="circle-open", line=dict(width=2)))
         fig.add_scatter(x=[mx[-1]], y=[my[-1]], mode="markers", name="Heel-off (100 %)",
                         marker=dict(color="black", size=10, symbol="square"))
-    # --- two feet (top view): stance and swing side
+    # --- square plot: fixed symmetric range (±1 when normalised)
+    if amp_norm:
+        Rg = 1.0
+    else:
+        m_ = max([np.abs(c_[1]).max() for c_ in curves] + [np.abs(c_[2]).max() for c_ in curves] + [0.1])
+        Rg = float(np.ceil(m_ * 1.1 * 4) / 4)                           # round up to 0.25
+    # --- two feet (top view): stance and swing side, in the half the paths don't use
     if curves:
-        allx = np.concatenate([c_[1] for c_ in curves]); ally = np.concatenate([c_[2] for c_ in curves])
-        y0 = min(ally.min(), 0.0); Lf = max(ally.max() - y0, 1e-3)      # foot length = data height
-        Wf = 0.36 * Lf
-        reach = max(np.abs(allx).max(), 0.05) + 0.7 * Wf
-        u = np.linspace(0, 1, 50)                                        # heel (0) -> toe (1)
-        widen = np.where(u < 0.72, 0.62 + 0.38 * u / 0.72, 1.0)          # narrow heel, wide forefoot
+        d_ = 1 if sel_type == FWD else -1                              # step direction
+        Lf, Wf = 0.75 * Rg, 0.28 * Rg
+        y0 = -0.95 * Rg if d_ > 0 else 0.20 * Rg                        # heel position
+        u = np.linspace(0, 1, 50)                                       # heel (0) -> toe (1)
+        widen = np.where(u < 0.72, 0.62 + 0.38 * u / 0.72, 1.0)         # narrow heel, wide forefoot
         hw = Wf / 2 * np.sin(np.pi * u) ** 0.35 * widen
-        arch = 1 - 0.4 * np.exp(-((u - 0.42) / 0.14) ** 2)               # medial arch
+        arch = 1 - 0.4 * np.exp(-((u - 0.42) / 0.14) ** 2)              # medial arch
         prof_y = np.r_[u, u[::-1]] * Lf + y0
         for side, lab, dash, fc in ((st_sign, "Stance", "solid", "rgba(90,90,90,0.18)"),
                                     (-st_sign, "Swing", "dash", "rgba(90,90,90,0.06)")):
-            cx = side * reach
+            cx = side * 0.6 * Rg
             fx = np.r_[cx + side * hw, (cx - side * hw * arch)[::-1]]
             fig.add_scatter(x=fx, y=prof_y, fill="toself", fillcolor=fc, mode="lines",
                             line=dict(color="rgba(70,70,70,0.6)", width=1.5, dash=dash),
                             hoverinfo="skip", showlegend=False)
-            fig.add_annotation(x=cx, y=y0, yshift=-14, text=f"<b>{lab}</b>", showarrow=False,
+            fig.add_annotation(x=cx, y=y0 + Lf / 2, text=f"<b>{lab}</b>", showarrow=False,
                                font=dict(size=12, color="#444"))
             if lab == "Swing":
-                d_ = 1 if sel_type == FWD else -1
-                ya = y0 + Lf if d_ > 0 else y0
-                fig.add_annotation(x=cx, y=ya + d_ * 0.25 * Lf, ax=cx, ay=ya + d_ * 0.02 * Lf,
+                tip = y0 + Lf if d_ > 0 else y0
+                fig.add_annotation(x=cx, y=tip + d_ * 0.14 * Rg, ax=cx, ay=tip + d_ * 0.02 * Rg,
                                    xref="x", yref="y", axref="x", ayref="y", showarrow=True,
                                    arrowhead=2, arrowwidth=2, arrowcolor="#444", text="")
-        fig.data = fig.data[-2:] + fig.data[:-2]                         # feet behind the paths
+        fig.data = fig.data[-2:] + fig.data[:-2]                        # feet behind the paths
     fig.add_hline(y=0, line=dict(color="grey", width=1))
     fig.add_vline(x=0, line=dict(color="grey", width=1))
     fig.update_xaxes(title_text=f"L5 ML ({unit_lbl}, + = {'stance' if st_sign > 0 else 'swing'} side)",
-                     zeroline=False)
+                     zeroline=False, range=[-Rg, Rg], constrain="domain")
     fig.update_yaxes(title_text=f"L5 AP ({unit_lbl}, + forward)", zeroline=False,
-                     scaleanchor="x", scaleratio=1)
-    fig.update_layout(title="ML × AP path (onset → heel-off)", height=560,
-                      margin=dict(t=50, b=40), legend=dict(groupclick="togglegroup"))
-    stretch(st.plotly_chart, fig)
+                     range=[-Rg, Rg], scaleanchor="x", scaleratio=1, constrain="domain")
+    fig.update_layout(title="ML × AP path (onset → heel-off)", width=680, height=760,
+                      margin=dict(t=50, b=40, l=60, r=20),
+                      legend=dict(groupclick="togglegroup", orientation="h", y=-0.12))
+    try:
+        st.plotly_chart(fig, width="content")
+    except TypeError:
+        st.plotly_chart(fig, use_container_width=False)
     st.caption("L5 acceleration path in the horizontal plane, top view (smoothed at 3 Hz for display; "
                "equal axis scales) · feet: stance (solid) and swing (dashed, arrow = step direction) · thin lines = steps · black = mean path · blue ellipses = ± SD of ML and AP at "
                "25, 50, 75 and 100 % of the APA. Click a step in the legend to hide it.")
