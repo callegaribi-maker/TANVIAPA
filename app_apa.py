@@ -12,6 +12,11 @@ from scipy.signal import butter, filtfilt
 
 FWD, BWD, IGN, UND = "forward", "backward", "ignore", "undefined"
 
+# ---- Author signature (edit here) ----
+AUTHOR = "Bianca Callegari"
+AUTHOR_INFO = ""          # e.g. "PhD candidate · University X" or an e-mail / Lattes link
+APP_VERSION = "1.0 (Oct 2026)"
+
 # =============================================================================
 # Processing core (no Streamlit dependency)
 # =============================================================================
@@ -329,7 +334,9 @@ def main():
     from plotly.subplots import make_subplots
     import plotly.colors as pc
 
-    st.set_page_config(page_title="Step APA", layout="wide")
+    st.set_page_config(page_title=f"Step APA — {AUTHOR}", layout="wide",
+                       menu_items={"About": f"**Step APA analysis** · v{APP_VERSION}\n\n"
+                                            f"Developed by **{AUTHOR}**" + (f" — {AUTHOR_INFO}" if AUTHOR_INFO else "")})
 
     def stretch(fn, *a, **k):
         """Works with new (width='stretch') and older (use_container_width) Streamlit."""
@@ -360,6 +367,10 @@ def main():
                              "For backward steps the AP APA is searched in the backward (−) direction.")
     Sel = sel_type.capitalize()
     st.title(f"{Sel}-step APA — L5 × leg")
+    st.caption(f"Developed by **{AUTHOR}**" + (f" · {AUTHOR_INFO}" if AUTHOR_INFO else "")
+               + f" · v{APP_VERSION}")
+    sb.markdown("---")
+    sb.caption(f"© {AUTHOR}" + (f" · {AUTHOR_INFO}" if AUTHOR_INFO else "") + f" · v{APP_VERSION}")
 
     ho_method, onset_method = "rise", "backward"   # fixed: most reliable criteria
     k_sd = sb.slider(
@@ -918,6 +929,11 @@ def main():
             "- **dv:** integral of acceleration from APA onset to heel-off (velocity change).\n"
             "- **Caution:** the L5 AP signal includes the gravity projection when the trunk tilts "
             "(≈0.17 m/s² per degree) as well as linear acceleration.")
+
+    st.markdown("---")
+    st.caption(f"Step APA analysis · developed by **{AUTHOR}**"
+               + (f" · {AUTHOR_INFO}" if AUTHOR_INFO else "") + f" · v{APP_VERSION}")
+
 
 
 main()
