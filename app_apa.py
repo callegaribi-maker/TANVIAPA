@@ -306,6 +306,124 @@ def apa_metrics(sig, ho, p):
     return out, bw
 
 
+def build_excel(trials, var_labels, meta, excluded):
+    """Excel workbook (bytes): Trials (included steps, all variables), Summary (n, mean, SD,
+    median, Q1, Q3, IQR, min, max as live formulas on Trials), Subject row (same statistics as
+    values, one row to paste into a group file) and Info (settings + definitions)."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter as L_
+
+    F = "Arial"
+    head = Font(name=F, bold=True, color="FFFFFF"); body = Font(name=F)
+    bold = Font(name=F, bold=True); fill = PatternFill("solid", fgColor="1F4E79")
+    thin = Border(bottom=Side(style="thin", color="BFBFBF"))
+    wb = Workbook()
+
+    # --- Trials
+    ws = wb.active; ws.title = "Trials"
+    id_cols = ["step", "event", "HO_s"]
+    cols = id_cols + list(var_labels)
+    ws.append(["Step", "Event", "Heel-off time (s)"] + [var_labels[c] for c in var_labels])
+    for _, r in trials.iterrows():
+        ws.append([None if pd.isna(r[c]) else (float(r[c]) if c not in ("step", "event") else int(r[c]))
+                   for c in cols])
+    n_last = ws.max_row
+    for c in range(1, len(cols) + 1):
+        h = ws.cell(1, c); h.font = head; h.fill = fill
+        h.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+        ws.column_dimensions[L_(c)].width = 14 if c <= 3 else 18
+        for r_ in range(2, n_last + 1):
+            ce = ws.cell(r_, c); ce.font = body
+            ce.number_format = "0" if c <= 2 else ("0.000" if c == 3 else "0.000")
+    ws.row_dimensions[1].height = 60
+    ws.freeze_panes = "D2"
+
+    # --- Summary (formulas on Trials)
+    sm = wb.create_sheet("Summary")
+    stats = [("n", "COUNT"), ("Mean", "AVERAGE"), ("SD", "STDEV"), ("Median", "MEDIAN"),
+             ("Q1 (25th pct)", "QUARTILE1"), ("Q3 (75th pct)", "QUARTILE3"), ("IQR (Q3 − Q1)", "IQR"),
+             ("Min", "MIN"), ("Max", "MAX")]
+    sm.append(["Variable"] + [s_ for s_, _ in stats])
+    for i, c in enumerate(var_labels):
+        col = L_(len(id_cols) + 1 + i); rng = f"Trials!{col}2:{col}{max(n_last, 2)}"
+        row = [var_labels[c]]
+        for name, fn in stats:
+            if fn == "QUARTILE1":
+                row.append(f'=IF(COUNT({rng})>0,QUARTILE({rng},1),"")')
+            elif fn == "QUARTILE3":
+                row.append(f'=IF(COUNT({rng})>0,QUARTILE({rng},3),"")')
+            elif fn == "IQR":
+                row.append(f'=IF(COUNT({rng})>0,QUARTILE({rng},3)-QUARTILE({rng},1),"")')
+            elif fn == "COUNT":
+                row.append(f"=COUNT({rng})")
+            elif fn == "STDEV":
+                row.append(f'=IF(COUNT({rng})>1,STDEV({rng}),"")')
+            else:
+                row.append(f'=IF(COUNT({rng})>0,{fn}({rng}),"")')
+        sm.append(row)
+    for c in range(1, len(stats) + 2):
+        h = sm.cell(1, c); h.font = head; h.fill = fill; h.alignment = Alignment(horizontal="center")
+        sm.column_dimensions[L_(c)].width = 58 if c == 1 else 13
+        for r_ in range(2, sm.max_row + 1):
+            ce = sm.cell(r_, c); ce.font = bold if c == 1 else body; ce.border = thin
+            ce.number_format = "0" if c == 2 else "0.000"
+    sm.freeze_panes = "B2"
+    r0 = sm.max_row + 2
+    sm.cell(r0, 1, "Statistics are live Excel formulas on the Trials sheet (sample SD; quartiles "
+                   "with Excel QUARTILE, inclusive method). Empty cells = variable not detected in "
+                   "that step; they are ignored.").font = Font(name=F, italic=True, color="595959")
+
+    # --- Subject row (values)
+    sr = wb.create_sheet("Subject row")
+    q = lambda x, p_: float(np.nanpercentile(x, p_)) if np.isfinite(x).any() else None
+    rec = {"Subject": meta["subject"], "Step type": meta["step_type"], "L5 with gravity": meta["gravity"],
+           "n steps included": len(trials), "Excluded steps": excluded}
+    for c in var_labels:
+        x = trials[c].astype(float).values
+        ok = np.isfinite(x)
+        rec[f"{c} n"] = int(ok.sum())
+        rec[f"{c} mean"] = float(np.nanmean(x)) if ok.any() else None
+        rec[f"{c} SD"] = float(np.nanstd(x, ddof=1)) if ok.sum() > 1 else None
+        rec[f"{c} median"] = float(np.nanmedian(x)) if ok.any() else None
+        rec[f"{c} Q1"] = q(x, 25); rec[f"{c} Q3"] = q(x, 75)
+    sr.append(list(rec)); sr.append(list(rec.values()))
+    for c in range(1, len(rec) + 1):
+        h = sr.cell(1, c); h.font = head; h.fill = fill
+        h.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+        v = sr.cell(2, c); v.font = body
+        if isinstance(v.value, float):
+            v.number_format = "0.000"
+        sr.column_dimensions[L_(c)].width = 16
+    sr.row_dimensions[1].height = 60
+    sr.freeze_panes = "B2"
+    sr.cell(4, 1, "Values (not formulas): copy row 2 into the group spreadsheet, one row per "
+                  "subject. Quartiles: linear interpolation (same as Excel QUARTILE.INC)."
+            ).font = Font(name=F, italic=True, color="595959")
+
+    # --- Info
+    inf = wb.create_sheet("Info")
+    inf.append(["Item", "Value"])
+    for k, v in meta.items():
+        inf.append([k, str(v)])
+    inf.append([]); inf.append(["Variable", "Definition"])
+    hdr2 = inf.max_row
+    for c, lab in var_labels.items():
+        inf.append([c, lab])
+    for r_ in (1, hdr2):
+        for c in (1, 2):
+            h = inf.cell(r_, c); h.font = head; h.fill = fill
+    for row_ in inf.iter_rows(min_row=2):
+        for ce in row_:
+            if ce.font != head:
+                ce.font = body
+    inf.column_dimensions["A"].width = 30; inf.column_dimensions["B"].width = 90
+
+    wb.calculation.fullCalcOnLoad = True
+    bio = io.BytesIO(); wb.save(bio)
+    return bio.getvalue()
+
+
 def run_pipeline(L, G, p):
     tj, lag_auto, tj_end = find_jump_and_lag(L, G, p["fs"], p["sync_thr"])
     if p.get("lag") is None:
@@ -846,13 +964,21 @@ def main():
         row_df = pd.DataFrame([row])
         st.markdown("**Subject summary — one row, ready to paste into the group spreadsheet**")
         stretch(st.dataframe, row_df, hide_index=True)
-        c1, c2 = st.columns(2)
-        c1.download_button("Download subject row (CSV)", row_df.to_csv(index=False),
-                           f"APA_{subj}_{sel_type}_summary.csv", "text/csv")
-        c2.download_button("Download per-step APA variables (CSV)",
-                           res_all[["included", "step", "event"] + list(APA_VARS)].assign(
-                               subject=subj, step_type=sel_type).to_csv(index=False),
-                           f"APA_{subj}_{sel_type}_steps.csv", "text/csv")
+        meta = {"subject": subj, "step_type": sel_type, "gravity": gL,
+                "L5 file": getattr(fL5, "name", ""), "Leg file": getattr(fLeg, "name", ""),
+                "heel-off criterion": "first peak of leg vertical acceleration > rest + "
+                                      f"{ho_thr} m/s²",
+                "APA onset criterion": f"backward from peak, band = max({k_sd} × baseline SD, "
+                                       f"{min_abs} m/s²)",
+                "sync lag (s)": round(p["lag"], 3), "author": AUTHOR, "app version": APP_VERSION}
+        xls = build_excel(res, APA_VARS, meta, ", ".join(map(str, excl)) or "-")
+        st.download_button("⬇ Download results (Excel .xlsx)", xls, f"APA_{subj}_{sel_type}.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           type="primary")
+        st.caption("Excel file: **Trials** (all included steps, all APA variables) · **Summary** "
+                   "(n, mean, SD, median, Q1, Q3, IQR, min, max per variable) · **Subject row** "
+                   "(one row with mean, SD, median, Q1, Q3 per variable, to paste into the group "
+                   "spreadsheet) · **Info** (settings and variable definitions).")
         st.info(
             "**How to read the APA variables** (HO = heel-off; times are in ms relative to HO, "
             "negative = before HO)\n\n"
